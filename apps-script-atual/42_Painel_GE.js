@@ -1,55 +1,75 @@
 // =============================================================================
-// 31_Painel_TD_TV_GE_SEM_MEXER_TY.gs
-// Reconstrói APENAS TD:TV como painel de diagnostico e decisao.
-// Nao mexe em D, TY, UA, UB, UC ou UD.
-// Nao usa formulas na planilha. Escreve apenas valores em TD:TV.
+// 31_Painel_GE.gs — Painel de diagnóstico e decisão (aba própria "Painel")
+// Lê B/D/F e PROJ V2/PROJ (por cabeçalho) da aba Histórico e escreve o painel
+// SOMENTE na aba "Painel" (valores, sem fórmulas). Nao mexe em D, TY, UA:UD.
+//
+// ESTRUTURAL: o painel morava nas colunas fixas TD:TV do Histórico e fazia
+// clearContent() dessa região a cada rebuild. O histórico cresce 4 colunas por
+// dia e, ao atingir ~130 programas, o bloco de calibragem (e a cauda do
+// histórico) entrou em TD:TV — o painel passou a apagar fórmulas e a escrever
+// texto onde a predição esperava números (#VALUE!). Nenhum bloco do Histórico
+// pode ter âncora de coluna fixa; por isso o painel vive em aba dedicada.
+//
 // Primeiro rode: painel31_testeZero_GE
 // Depois rode:   painel31_reconstruir_TDTV_GE
 // Opcional:      painel31_instalarGatilho_TDTV_GE
 // =============================================================================
+
+var PAINEL31_SHEET_NAME = 'Painel';
+var PAINEL31_NCOLS = 19;
 
 function painel31_testeZero_GE() {
   Logger.log('OK painel31: o arquivo compilou e executou.');
   return 'OK painel31: o arquivo compilou e executou.';
 }
 
+// Garante a aba "Painel" com espaço para cabeçalhos (1-2), minutos (3-62) e
+// resumo (66+).
+function painel31_getPainelSheet_GE_(ss) {
+  var sh = ss.getSheetByName(PAINEL31_SHEET_NAME);
+  if (!sh) {
+    sh = ss.insertSheet(PAINEL31_SHEET_NAME);
+  }
+  if (sh.getMaxRows() < 100) {
+    sh.insertRowsAfter(sh.getMaxRows(), 100 - sh.getMaxRows());
+  }
+  if (sh.getMaxColumns() < PAINEL31_NCOLS) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), PAINEL31_NCOLS - sh.getMaxColumns());
+  }
+  return sh;
+}
+
 function painel31_reconstruir_TDTV_GE() {
   var ss = painel31_getSpreadsheet_GE_();
   var sh = ss.getSheetByName('Histórico');
   if (!sh) {
-    sh = ss.getSheetByName('Histórico');
-  }
-  if (!sh) {
     throw new Error('Aba GE - Histórico nao encontrada.');
   }
+  var shPainel = painel31_getPainelSheet_GE_(ss);
 
   var colB = 2;
   var colD = 4;
   var colF = 6;
-  var colTD = painel31_colunaNumero_GE_('TD');
-  var colTV = painel31_colunaNumero_GE_('TV');
-  var colTYPadrao = painel31_colunaNumero_GE_('TY');
-  var colUDPadrao = painel31_colunaNumero_GE_('UD');
-  var nCols = colTV - colTD + 1;
+  var nCols = PAINEL31_NCOLS;
 
-  if (sh.getMaxColumns() < colTV) {
-    sh.insertColumnsAfter(sh.getMaxColumns(), colTV - sh.getMaxColumns());
-  }
-
+  // PROJ V2 / PROJ são localizadas por cabeçalho; sem fallback de letra fixa
+  // (TY/UD): num histórico que cresce, uma letra fixa cedo ou tarde aponta
+  // para dado errado. Sem a coluna, o painel degrada para D (audUsada).
   var colTY = painel31_acharCabecalho_GE_(sh, 'PROJ V2');
-  if (colTY < 1) {
-    colTY = colTYPadrao;
-  }
   var colUD = painel31_acharCabecalho_GE_(sh, 'PROJ');
-  if (colUD < 1 || colUD === colTY) {
-    colUD = colUDPadrao;
+  if (colUD === colTY) {
+    colUD = -1;
   }
 
+  var vazio60 = [];
+  for (var z = 0; z < 60; z++) {
+    vazio60.push(['']);
+  }
   var valsB = sh.getRange(3, colB, 60, 1).getValues();
   var valsD = sh.getRange(3, colD, 60, 1).getValues();
   var valsF = sh.getRange(3, colF, 60, 1).getValues();
-  var valsTY = sh.getRange(3, colTY, 60, 1).getValues();
-  var valsUD = sh.getRange(3, colUD, 60, 1).getValues();
+  var valsTY = colTY >= 1 ? sh.getRange(3, colTY, 60, 1).getValues() : vazio60;
+  var valsUD = colUD >= 1 ? sh.getRange(3, colUD, 60, 1).getValues() : vazio60;
   var formulasD = sh.getRange(3, colD, 60, 1).getFormulas();
 
   var B = [];
@@ -161,16 +181,17 @@ function painel31_reconstruir_TDTV_GE() {
     ]);
   }
 
-  // Limpa apenas TD:TV, deixando D, TY e UA:UD intactos.
-  sh.getRange(1, colTD, 100, nCols).clearContent();
-  sh.getRange(1, colTD, 1, nCols).setValues(headers1);
-  sh.getRange(2, colTD, 1, nCols).setValues(headers2);
-  sh.getRange(3, colTD, 60, nCols).setValues(out);
+  // Reescreve somente a aba Painel; o Histórico não é tocado.
+  shPainel.getRange(1, 1, 100, nCols).clearContent();
+  shPainel.getRange(1, 1, 1, nCols).setValues(headers1);
+  shPainel.getRange(2, 1, 1, nCols).setValues(headers2);
+  shPainel.getRange(3, 1, 60, nCols).setValues(out);
+  shPainel.setFrozenRows(2);
 
-  painel31_escreverResumo_GE_(sh, colTD, nCols, lastReal, fatorDiaGlobal, finalPrev, TY, D, F);
+  painel31_escreverResumo_GE_(shPainel, 1, nCols, lastReal, fatorDiaGlobal, finalPrev, TY, D, F);
   SpreadsheetApp.flush();
 
-  return 'OK: TD:TV reconstruido. Ultimo real: linha ' + (lastReal >= 0 ? (lastReal + 3) : 'nenhuma') + '. Final previsto: ' + painel31_fmtNum_GE_(finalPrev) + '.';
+  return 'OK: aba Painel reconstruida. Ultimo real: linha ' + (lastReal >= 0 ? (lastReal + 3) : 'nenhuma') + '. Final previsto: ' + painel31_fmtNum_GE_(finalPrev) + '.';
 }
 
 function painel31_instalarGatilho_TDTV_GE() {
@@ -610,4 +631,78 @@ function painel31_colunaNumero_GE_(letras) {
     n = n * 26 + (s.charCodeAt(i) - 64);
   }
   return n;
+}
+
+// =============================================================================
+// MIGRAÇÃO ESTRUTURAL — painel TD:TV → aba "Painel"
+// =============================================================================
+// 1) Garante a aba Painel.
+// 2) Remove do Histórico os resíduos do painel antigo, identificados coluna a
+//    coluna pelo par de cabeçalhos (linha 1, linha 2) exclusivo do painel.
+// 3) Regenera calibragem GS–GY e fator tema GZ–HC (o painel antigo havia
+//    escrito texto por cima dessas fórmulas).
+// 4) Repara eventuais fórmulas #NAME? remanescentes.
+// 5) Reconstrói o painel na aba nova.
+// Idempotente: pode rodar de novo sem efeito colateral.
+function migrarPainelParaAbaGE() {
+    var ss = SpreadsheetApp.getActive();
+    var hist = ss.getSheetByName(CFG.GE_OUT_HISTORICO);
+    if (!hist) throw new Error('Aba "' + CFG.GE_OUT_HISTORICO + '" não encontrada.');
+
+    painel31_getPainelSheet_GE_(ss);
+
+    // 2) Localiza resíduos do painel antigo coluna a coluna, casando o PAR de
+    //    cabeçalhos (linha 1, linha 2). Os pares do painel são exclusivos —
+    //    ex.: ('RUPTURA','QUEBRA') é painel; ('RUPTURA','GX') é calibragem —
+    //    então isso funciona mesmo se a calibragem já sobrescreveu parte do
+    //    bloco (sobreposição parcial). Só o resíduo é limpo.
+    var paresPainel = {
+        'BASE HIST.|B': 1, 'DIA/HIST|D/B': 1, 'FATOR DIA|DIA': 1,
+        'RECENTE|ULTIMOS': 1, 'INCLINACAO|TEND.': 1, 'RUPTURA|QUEBRA': 1,
+        'FATOR FINAL|COMBO': 1, 'SINAL TEMA|UD/TY': 1, 'TROCA TEMA|MUDOU?': 1,
+        'DUR. BLOCO|MIN.': 1, 'FATOR TEMA|TEMA': 1, 'SINAL|STATUS': 1,
+        'SUGESTAO|ACAO': 1, 'MOTIVO|EXPLICA': 1, 'PROGNOSTICO|LEITURA': 1,
+        'FOCO|EDITORIAL': 1, 'RISCO|RISCO': 1, 'MEDIA 5|PROX.5': 1,
+        'FINAL PREV.|FINAL': 1
+    };
+    var colunasLimpas = 0;
+    var lastCol = hist.getLastColumn();
+    if (lastCol > 0) {
+        var cab = hist.getRange(1, 1, 2, lastCol).getValues();
+        for (var c = 0; c < lastCol; c++) {
+            var chave = String(cab[0][c] || '').trim().toUpperCase() + '|' +
+                        String(cab[1][c] || '').trim().toUpperCase();
+            if (paresPainel[chave]) {
+                hist.getRange(1, c + 1, 100, 1).clearContent();
+                colunasLimpas++;
+            }
+        }
+    }
+
+    // 3) Regenera calibragem + fator tema (com o gravador locale-aware)
+    atualizarCalibragemGE_(hist);
+    atualizarFatorTemaGE_(hist);
+    SpreadsheetApp.flush();
+
+    // 4) Repara #NAME? remanescentes
+    var reparadas = 0;
+    try { reparadas = repararFormulasQuebradasGE(); } catch (e) {
+        Logger.log('[Migração Painel] Reparo #NAME? falhou: ' + e);
+    }
+
+    // 5) Painel na aba nova
+    var msg = painel31_reconstruir_TDTV_GE();
+
+    var resumo = 'Colunas de painel limpas no Histórico: ' + colunasLimpas +
+        ' | Fórmulas #NAME? reparadas: ' + reparadas + ' | ' + msg;
+    Logger.log('[Migração Painel] ' + resumo);
+    try { logGE_('MIGRACAO_PAINEL', resumo); } catch (e) {}
+    return resumo;
+}
+
+function migrarPainelParaAbaMenuGE() {
+    var resumo = migrarPainelParaAbaGE();
+    try {
+        SpreadsheetApp.getUi().alert('🏗️ Migração concluída', resumo, SpreadsheetApp.getUi().ButtonSet.OK);
+    } catch (e) {}
 }

@@ -408,11 +408,13 @@ function preencherSombraHojeGE_(sh) {
 
 function atualizarTituloHojeGE_(sh, hist) {
     try {
-        const colFinal = acharColunaPorHeaderGE_(hist, "FINAL PREV.");
+        // "FINAL PREV." vem do painel de decisão, que mora na aba Painel.
+        const shPainel = SpreadsheetApp.getActive().getSheetByName(
+            typeof PAINEL31_SHEET_NAME !== "undefined" ? PAINEL31_SHEET_NAME : "Painel") || hist;
+        const finalPrev = lerColunaPainelGE_(shPainel, "FINAL PREV.", 1);
         let prev = "";
-        if (colFinal) {
-            const v = hist.getRange(3, colFinal).getValue();
-            if (typeof v === "number") prev = " — Média final prevista: " + v.toFixed(2).replace(".", ",");
+        if (finalPrev.length && typeof finalPrev[0] === "number") {
+            prev = " — Média final prevista: " + finalPrev[0].toFixed(2).replace(".", ",");
         }
         const dataStr = Utilities.formatDate(new Date(), CFG.TIMEZONE, "dd/MM/yyyy");
         const contexto = String(getConfigValueGE_("CONTEXTO_ATIVO", "NORMAL"));
@@ -427,14 +429,17 @@ function atualizarDecisaoEditorialHojeGE_(sh, hist) {
     const n = HOJE_GE.N_MIN;
     const limiarRuptura = Number(getConfigValueGE_("LIMIAR_RUPTURA", 0.20)) || 0.20;
 
+    // O painel de decisão mora na aba "Painel" (era TD:TV no Histórico).
+    const shPainel = SpreadsheetApp.getActive().getSheetByName(
+        typeof PAINEL31_SHEET_NAME !== "undefined" ? PAINEL31_SHEET_NAME : "Painel") || hist;
     const painel = {
-        sinal: lerColunaPainelGE_(hist, "SINAL", n),
-        motivo: lerColunaPainelGE_(hist, "MOTIVO", n),
-        sugestao: lerColunaPainelGE_(hist, "SUGESTAO", n),
-        risco: lerColunaPainelGE_(hist, "RISCO", n),
-        fatorTema: lerColunaPainelGE_(hist, "FATOR TEMA", n),
-        durBloco: lerColunaPainelGE_(hist, "DUR. BLOCO", n),
-        ruptura: lerColunaPainelGE_(hist, "RUPTURA", n)
+        sinal: lerColunaPainelGE_(shPainel, "SINAL", n),
+        motivo: lerColunaPainelGE_(shPainel, "MOTIVO", n),
+        sugestao: lerColunaPainelGE_(shPainel, "SUGESTAO", n),
+        risco: lerColunaPainelGE_(shPainel, "RISCO", n),
+        fatorTema: lerColunaPainelGE_(shPainel, "FATOR TEMA", n),
+        durBloco: lerColunaPainelGE_(shPainel, "DUR. BLOCO", n),
+        ruptura: lerColunaPainelGE_(shPainel, "RUPTURA", n)
     };
 
     const grade = sh.getRange(3, 2, n, 17); // B..R
@@ -737,8 +742,19 @@ function acharColunaPorHeaderGE_(sheet, texto) {
     return 0;
 }
 
-function lerColunaPainelGE_(hist, header, n) {
-    const col = acharColunaPorHeaderGE_(hist, header);
+// Procura o cabeçalho nas linhas 1 E 2 (na aba Painel, SINAL/FATOR TEMA/etc.
+// ficam na linha 1; a linha 2 tem os rótulos curtos STATUS/TEMA/...).
+function lerColunaPainelGE_(shPainel, header, n) {
+    const alvo = header.toUpperCase();
+    const lastCol = shPainel.getLastColumn();
+    if (!lastCol) return new Array(n).fill("");
+    const linhas = shPainel.getRange(1, 1, 2, lastCol).getValues();
+    let col = 0;
+    for (let r = 0; r < 2 && !col; r++) {
+        for (let c = 0; c < lastCol; c++) {
+            if (String(linhas[r][c] || "").trim().toUpperCase() === alvo) { col = c + 1; break; }
+        }
+    }
     if (!col) return new Array(n).fill("");
-    return hist.getRange(3, col, n, 1).getValues().map(r => r[0]);
+    return shPainel.getRange(3, col, n, 1).getValues().map(r => r[0]);
 }

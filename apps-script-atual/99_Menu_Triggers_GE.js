@@ -30,6 +30,7 @@ function onOpen() {
         .addItem("📊 Atualizar médias semanais/mensais", "atualizarMediasMenuGE")
         .addItem("🎨 Corrigir formatação do Histórico", "corrigirFormatacaoHistoricoMenuGE")
         .addItem("🔧 Reparar fórmulas quebradas (#NAME?)", "repararFormulasQuebradasMenuGE")
+        .addItem("🏗️ Migrar painel TD:TV para aba Painel", "migrarPainelParaAbaMenuGE")
         .addSeparator()
         .addItem("🤖 Status da automação", "statusAutomacaoGE")
         .addSubMenu(ui.createMenu("⚙️ Configurações")

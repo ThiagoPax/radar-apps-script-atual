@@ -29,6 +29,7 @@ function onOpen() {
         .addItem("📺 Atualizar breaks Globo", "atualizarBreaksMenuGE")
         .addItem("📊 Atualizar médias semanais/mensais", "atualizarMediasMenuGE")
         .addItem("🎨 Corrigir formatação do Histórico", "corrigirFormatacaoHistoricoMenuGE")
+        .addItem("🔧 Reparar fórmulas quebradas (#NAME?)", "repararFormulasQuebradasMenuGE")
         .addSeparator()
         .addItem("🤖 Status da automação", "statusAutomacaoGE")
         .addSubMenu(ui.createMenu("⚙️ Configurações")

@@ -90,9 +90,29 @@ function mediaArrGE_(arr) {
 // GRAVAÇÃO DE FÓRMULAS SEM SHEETS API AVANÇADA
 // =============================================================================
 // Evita chamadas a Sheets.Spreadsheets.Values.update, que exigem ativar a
-// Google Sheets API no projeto GCP. Usamos SpreadsheetApp/setValue/setValues,
-// que grava fórmulas como entrada de usuário no próprio arquivo.
+// Google Sheets API no projeto GCP. Usamos SpreadsheetApp, que grava a
+// fórmula direto no arquivo.
+//
+// ATENÇÃO — locale: diferente de Values.update com USER_ENTERED, o
+// SpreadsheetApp (setValue/setValues/setFormula) interpreta a string SEMPRE
+// na sintaxe canônica en-US (IF, ROUND, vírgula como separador e ponto
+// decimal), independente do locale da planilha. Gravar "=SE(...;...)" por
+// esse caminho armazena uma função desconhecida "SE" → #NAME?, e o pior:
+// na interface pt-BR a fórmula quebrada é exibida exatamente igual à
+// versão correta digitada à mão. Por isso TODA fórmula passa por
+// localizarFormulaGE_ antes da gravação.
 // -----------------------------------------------------------------------------
+function localizarFormulaGE_(formula) {
+    var f = String(formula);
+    if (f.charAt(0) !== "=") return f; // não é fórmula
+    try {
+        return pv2LocalizeFormula_(f, pv2DetectFormulaDialect_());
+    } catch (e) {
+        // fallback: canônico en-US, aceito pelo parser em qualquer locale
+        return pv2LocalizeFormula_(f, "EN_COMMA");
+    }
+}
+
 function setFormulaSafeNoApiGE_(range, formula) {
     if (formula === null || formula === undefined || formula === "") {
         range.clearContent();
@@ -100,16 +120,69 @@ function setFormulaSafeNoApiGE_(range, formula) {
     }
     var f = String(formula);
     if (f.charAt(0) !== "=") f = "=" + f;
-    range.setValue(f);
+    range.setFormula(localizarFormulaGE_(f));
 }
 
 function setFormulasUserEnteredNoApiGE_(range, values) {
     if (!values || values.length === 0) return;
-    range.setValues(values);
+    var out = new Array(values.length);
+    for (var i = 0; i < values.length; i++) {
+        var row = new Array(values[i].length);
+        for (var j = 0; j < values[i].length; j++) {
+            var v = values[i][j];
+            row[j] = (typeof v === "string" && v.charAt(0) === "=") ? localizarFormulaGE_(v) : v;
+        }
+        out[i] = row;
+    }
+    range.setValues(out);
 }
 
 function batchSetFormulasSafeNoApiGE_(range, formulas) {
     setFormulasUserEnteredNoApiGE_(range, formulas);
+}
+
+// --- Reparo one-shot de fórmulas quebradas (#NAME?) ---
+// Corrige células que ficaram com nome de função pt-BR armazenado literalmente
+// (SE, ARRED, MÉDIA, ...) por terem sido gravadas via setValue/setValues sem
+// tradução para a sintaxe canônica. Varre todas as abas e reescreve, via
+// localizarFormulaGE_, apenas células cujo valor exibido é o erro #NAME? —
+// células corretas nunca são tocadas. Executável pelo menu ou pelo editor.
+function repararFormulasQuebradasGE() {
+    var ss = SpreadsheetApp.getActive();
+    var sheets = ss.getSheets();
+    var fixed = 0, kept = 0;
+    for (var s = 0; s < sheets.length; s++) {
+        var sheet = sheets[s];
+        var lastRow = sheet.getLastRow(), lastCol = sheet.getLastColumn();
+        if (lastRow === 0 || lastCol === 0) continue;
+        var rng = sheet.getRange(1, 1, lastRow, lastCol);
+        var formulas = rng.getFormulas();
+        var display = rng.getDisplayValues();
+        for (var i = 0; i < formulas.length; i++) {
+            for (var j = 0; j < formulas[i].length; j++) {
+                var f = formulas[i][j];
+                if (!f) continue;
+                if (display[i][j] !== "#NAME?") continue;
+                var novo = localizarFormulaGE_(f);
+                if (novo !== f) {
+                    sheet.getRange(i + 1, j + 1).setFormula(novo);
+                    fixed++;
+                } else {
+                    kept++; // #NAME? que a tradução não altera (causa diversa)
+                }
+            }
+        }
+    }
+    Logger.log("[Reparo #NAME?] corrigidas: " + fixed + " | não traduzíveis: " + kept);
+    try { logGE_("REPARO", fixed + " fórmulas #NAME? re-localizadas"); } catch (e) {}
+    return fixed;
+}
+
+function repararFormulasQuebradasMenuGE() {
+    var n = repararFormulasQuebradasGE();
+    try {
+        SpreadsheetApp.getUi().alert("🔧 Reparo concluído", n + " fórmulas #NAME? corrigidas.", SpreadsheetApp.getUi().ButtonSet.OK);
+    } catch (e) {}
 }
 
 function batchSetFormulasSparseSafeNoApiGE_(sheet, entries) {

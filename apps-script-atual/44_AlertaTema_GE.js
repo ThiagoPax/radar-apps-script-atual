@@ -316,7 +316,7 @@ function atualizarAlertaColunasGE_(sheet) {
     hhF.push(['=SE(F' + row + '="";"";F' + row + ')']);
 
     // === HI: SEGUIU? ===
-    hiF.push(['=SE(OU(' + HGl+row + '="";"' + HHl+row + '="");"—";SE(' + HGl+row + '=' + HHl+row + ';"✅ SIM";"❌ NÃO"))']);
+    hiF.push(['=SE(OU(' + HGl+row + '="";' + HHl+row + '="");"—";SE(' + HGl+row + '=' + HHl+row + ';"✅ SIM";"❌ NÃO"))']);
   }
 
   batchSetFormulasSafe_(sheet.getRange(3, alertStartCol, 60, 1), hdF);

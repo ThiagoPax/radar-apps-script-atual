@@ -684,6 +684,87 @@ function migrarPainelParaAbaGE() {
     atualizarFatorTemaGE_(hist);
     SpreadsheetApp.flush();
 
+    // 3b) Reaponta as fórmulas de previsão em D3:D62 para a coluna FATOR TEMA
+    //     ATUAL. Elas guardam o coeficiente do minuto e a letra da coluna do
+    //     fator calculada NA HORA em que foram escritas; se a contagem de
+    //     programas mudou desde então (ex.: o painel antigo destruiu o bloco
+    //     do programa mais antigo), a letra fica órfã apontando para outra
+    //     coluna. Só células com fórmula no padrão =ROUND(coef*COLn,2) são
+    //     tocadas — valores reais digitados ficam intactos.
+    var audColsM = getAudColsGE_(hist);
+    var calibStartM = 4 + audColsM.length * 4;
+    var temMinuto = !!ss.getSheetByName('Tema Minuto');
+    var fatorL = temMinuto ? columnToLetter_(calibStartM + 10) : null;
+    var reapontadas = 0;
+    if (fatorL) {
+        var dForms = hist.getRange(3, 4, 60, 1).getFormulas();
+        var rePred = /^=ROUND\((\d+(?:\.\d+)?)\*[A-Z]{1,3}\d+,2\)$/;
+        for (var i2 = 0; i2 < 60; i2++) {
+            var fD = dForms[i2][0];
+            if (!fD) continue;
+            var mD = fD.match(rePred);
+            if (mD) {
+                var novaF = '=ROUND(' + mD[1] + '*' + fatorL + (3 + i2) + ',2)';
+                if (novaF !== fD) {
+                    hist.getRange(3 + i2, 4).setFormula(novaF);
+                    reapontadas++;
+                }
+            }
+        }
+    }
+
+    // 3c) Remove textos de prognóstico do painel antigo que sobraram na
+    //     coluna 📌 LOG SGEST. (o módulo de alerta preserva essa coluna de
+    //     propósito, então a sobra ficaria lá para sempre). Padrão exclusivo
+    //     do painel: "Final 0,73 | prox.5 0,47 | previsao".
+    var logLimpos = 0;
+    if (temMinuto) {
+        var logCol = calibStartM + 14; // HG = alertStart(+11) + 3
+        if (logCol <= hist.getLastColumn() &&
+            String(hist.getRange(2, logCol).getValue() || '').trim().toUpperCase() === 'HG') {
+            var logVals = hist.getRange(3, logCol, 60, 1).getValues();
+            var rePainelTxt = /^Final .+\|.*(previsao|base real)\s*$/;
+            for (var i3 = 0; i3 < 60; i3++) {
+                if (rePainelTxt.test(String(logVals[i3][0] || ''))) {
+                    hist.getRange(3 + i3, logCol).clearContent();
+                    logLimpos++;
+                }
+            }
+        }
+    }
+
+    // 3d) Limpa cópias órfãs do bloco de alerta HD–HI (o bloco anda com a
+    //     calibragem; quando a contagem de programas recua, a cópia antiga
+    //     fica para trás). Mantém apenas o bloco na posição atual.
+    var paresAlerta = {
+        '🚦 SINAL|HD': 1, '💡 SUGESTÃO|HE': 1, '📋 MOTIVO|HF': 1,
+        '📌 LOG SGEST.|HG': 1, '✅ ESCOLHA|HH': 1, '🎯 SEGUIU?|HI': 1
+    };
+    var alertStartM = temMinuto ? calibStartM + 11 : calibStartM + 7;
+    var orfasLimpas = 0;
+    var lastColM = hist.getLastColumn();
+    if (lastColM > 0) {
+        var cabM = hist.getRange(1, 1, 2, lastColM).getValues();
+        for (var c2 = 0; c2 < lastColM; c2++) {
+            var col1b = c2 + 1;
+            if (col1b >= alertStartM && col1b <= alertStartM + 5) continue; // bloco atual
+            var chaveA = String(cabM[0][c2] || '').trim().toUpperCase() + '|' +
+                         String(cabM[1][c2] || '').trim().toUpperCase();
+            if (paresAlerta[chaveA]) {
+                hist.getRange(1, col1b, 100, 1).clearContent();
+                orfasLimpas++;
+            }
+        }
+    }
+
+    // 3e) Regenera o bloco de alerta HD–HI na posição atual
+    try {
+        if (typeof atualizarAlertaColunasGE_ === 'function') atualizarAlertaColunasGE_(hist);
+    } catch (e) {
+        Logger.log('[Migração Painel] Alerta HD–HI não regenerado: ' + e);
+    }
+    SpreadsheetApp.flush();
+
     // 4) Repara #NAME? remanescentes
     var reparadas = 0;
     try { reparadas = repararFormulasQuebradasGE(); } catch (e) {
@@ -694,6 +775,9 @@ function migrarPainelParaAbaGE() {
     var msg = painel31_reconstruir_TDTV_GE();
 
     var resumo = 'Colunas de painel limpas no Histórico: ' + colunasLimpas +
+        ' | Fórmulas D reapontadas: ' + reapontadas +
+        ' | LOG SGEST. limpas: ' + logLimpos +
+        ' | Colunas de alerta órfãs limpas: ' + orfasLimpas +
         ' | Fórmulas #NAME? reparadas: ' + reparadas + ' | ' + msg;
     Logger.log('[Migração Painel] ' + resumo);
     try { logGE_('MIGRACAO_PAINEL', resumo); } catch (e) {}

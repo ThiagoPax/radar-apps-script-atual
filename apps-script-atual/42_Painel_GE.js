@@ -1,0 +1,613 @@
+// =============================================================================
+// 31_Painel_TD_TV_GE_SEM_MEXER_TY.gs
+// Reconstrói APENAS TD:TV como painel de diagnostico e decisao.
+// Nao mexe em D, TY, UA, UB, UC ou UD.
+// Nao usa formulas na planilha. Escreve apenas valores em TD:TV.
+// Primeiro rode: painel31_testeZero_GE
+// Depois rode:   painel31_reconstruir_TDTV_GE
+// Opcional:      painel31_instalarGatilho_TDTV_GE
+// =============================================================================
+
+function painel31_testeZero_GE() {
+  Logger.log('OK painel31: o arquivo compilou e executou.');
+  return 'OK painel31: o arquivo compilou e executou.';
+}
+
+function painel31_reconstruir_TDTV_GE() {
+  var ss = painel31_getSpreadsheet_GE_();
+  var sh = ss.getSheetByName('Histórico');
+  if (!sh) {
+    sh = ss.getSheetByName('Histórico');
+  }
+  if (!sh) {
+    throw new Error('Aba GE - Histórico nao encontrada.');
+  }
+
+  var colB = 2;
+  var colD = 4;
+  var colF = 6;
+  var colTD = painel31_colunaNumero_GE_('TD');
+  var colTV = painel31_colunaNumero_GE_('TV');
+  var colTYPadrao = painel31_colunaNumero_GE_('TY');
+  var colUDPadrao = painel31_colunaNumero_GE_('UD');
+  var nCols = colTV - colTD + 1;
+
+  if (sh.getMaxColumns() < colTV) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), colTV - sh.getMaxColumns());
+  }
+
+  var colTY = painel31_acharCabecalho_GE_(sh, 'PROJ V2');
+  if (colTY < 1) {
+    colTY = colTYPadrao;
+  }
+  var colUD = painel31_acharCabecalho_GE_(sh, 'PROJ');
+  if (colUD < 1 || colUD === colTY) {
+    colUD = colUDPadrao;
+  }
+
+  var valsB = sh.getRange(3, colB, 60, 1).getValues();
+  var valsD = sh.getRange(3, colD, 60, 1).getValues();
+  var valsF = sh.getRange(3, colF, 60, 1).getValues();
+  var valsTY = sh.getRange(3, colTY, 60, 1).getValues();
+  var valsUD = sh.getRange(3, colUD, 60, 1).getValues();
+  var formulasD = sh.getRange(3, colD, 60, 1).getFormulas();
+
+  var B = [];
+  var D = [];
+  var F = [];
+  var TY = [];
+  var UD = [];
+  var isReal = [];
+  var ratioReal = [];
+  var lastReal = -1;
+
+  for (var i = 0; i < 60; i++) {
+    B[i] = painel31_num_GE_(valsB[i][0]);
+    D[i] = painel31_num_GE_(valsD[i][0]);
+    F[i] = painel31_text_GE_(valsF[i][0]);
+    TY[i] = painel31_num_GE_(valsTY[i][0]);
+    UD[i] = painel31_num_GE_(valsUD[i][0]);
+    isReal[i] = painel31_isNumero_GE_(D[i]) && String(formulasD[i][0] || '') === '';
+    if (isReal[i]) {
+      lastReal = i;
+    }
+    ratioReal[i] = (isReal[i] && B[i] > 0) ? D[i] / B[i] : null;
+  }
+
+  var ratiosUsaveis = [];
+  for (var r = 0; r <= lastReal; r++) {
+    if (painel31_isNumero_GE_(ratioReal[r])) {
+      ratiosUsaveis.push(ratioReal[r]);
+    }
+  }
+
+  var fatorDiaGlobal = painel31_mediana_GE_(ratiosUsaveis);
+  if (!painel31_isNumero_GE_(fatorDiaGlobal)) {
+    fatorDiaGlobal = 1;
+  }
+
+  var finalPrev = painel31_mediaFinalPrevista_GE_(D, TY, lastReal);
+
+  var headers1 = [[
+    'BASE HIST.', 'DIA/HIST', 'FATOR DIA', 'RECENTE', 'INCLINACAO', 'RUPTURA', 'FATOR FINAL',
+    'SINAL TEMA', 'TROCA TEMA', 'DUR. BLOCO', 'FATOR TEMA',
+    'SINAL', 'SUGESTAO', 'MOTIVO', 'PROGNOSTICO', 'FOCO', 'RISCO', 'MEDIA 5', 'FINAL PREV.'
+  ]];
+
+  var headers2 = [[
+    'B', 'D/B', 'DIA', 'ULTIMOS', 'TEND.', 'QUEBRA', 'COMBO',
+    'UD/TY', 'MUDOU?', 'MIN.', 'TEMA',
+    'STATUS', 'ACAO', 'EXPLICA', 'LEITURA', 'EDITORIAL', 'RISCO', 'PROX.5', 'FINAL'
+  ]];
+
+  var out = [];
+  var blocoDur = 0;
+  var temaAnterior = '';
+
+  for (var m = 0; m < 60; m++) {
+    var base = B[m];
+    var audUsada = isReal[m] ? D[m] : (painel31_isNumero_GE_(TY[m]) ? TY[m] : D[m]);
+    var ratio = (base > 0 && painel31_isNumero_GE_(audUsada)) ? audUsada / base : null;
+
+    var recente = painel31_fatorRecente_GE_(ratioReal, m, fatorDiaGlobal);
+    var inclinacao = painel31_inclinacao_GE_(ratioReal, m);
+    var ruptura = painel31_ruptura_GE_(inclinacao);
+    var fatorFinal = painel31_clamp_GE_(0.55 * fatorDiaGlobal + 0.35 * recente + 0.10 * (1 + inclinacao), 0.55, 1.55);
+
+    var fatorTema = 1;
+    if (painel31_isNumero_GE_(UD[m]) && painel31_isNumero_GE_(TY[m]) && TY[m] > 0) {
+      fatorTema = painel31_clamp_GE_(UD[m] / TY[m], 0.85, 1.15);
+    } else if (painel31_isNumero_GE_(UD[m]) && base > 0) {
+      fatorTema = painel31_clamp_GE_(UD[m] / base, 0.85, 1.15);
+    }
+
+    var temaAtual = F[m];
+    if (m === 0 || temaAtual !== temaAnterior) {
+      blocoDur = 1;
+    } else {
+      blocoDur++;
+    }
+    var trocou = (m > 0 && temaAtual !== temaAnterior) ? 'SIM' : 'NAO';
+    temaAnterior = temaAtual;
+
+    var sinal = painel31_sinal_GE_(ratio, inclinacao, fatorTema, isReal[m]);
+    var sugestao = painel31_sugestao_GE_(sinal, fatorTema, temaAtual, blocoDur);
+    var motivo = painel31_motivo_GE_(ratio, recente, inclinacao, fatorTema, isReal[m]);
+    var prognostico = painel31_prognostico_GE_(TY, D, lastReal, m, finalPrev);
+    var foco = painel31_foco_GE_(temaAtual, fatorTema, blocoDur);
+    var risco = painel31_risco_GE_(ratio, inclinacao, fatorTema);
+    var media5 = painel31_mediaProximos_GE_(TY, D, lastReal, m, 5);
+
+    out.push([
+      painel31_numOuVazio_GE_(base),
+      painel31_numOuVazio_GE_(ratio),
+      painel31_numOuVazio_GE_(fatorDiaGlobal),
+      painel31_numOuVazio_GE_(recente),
+      painel31_numOuVazio_GE_(inclinacao),
+      ruptura,
+      painel31_numOuVazio_GE_(fatorFinal),
+      painel31_numOuVazio_GE_(fatorTema),
+      trocou,
+      blocoDur,
+      painel31_resumoTema_GE_(fatorTema),
+      sinal,
+      sugestao,
+      motivo,
+      prognostico,
+      foco,
+      risco,
+      painel31_numOuVazio_GE_(media5),
+      painel31_numOuVazio_GE_(finalPrev)
+    ]);
+  }
+
+  // Limpa apenas TD:TV, deixando D, TY e UA:UD intactos.
+  sh.getRange(1, colTD, 100, nCols).clearContent();
+  sh.getRange(1, colTD, 1, nCols).setValues(headers1);
+  sh.getRange(2, colTD, 1, nCols).setValues(headers2);
+  sh.getRange(3, colTD, 60, nCols).setValues(out);
+
+  painel31_escreverResumo_GE_(sh, colTD, nCols, lastReal, fatorDiaGlobal, finalPrev, TY, D, F);
+  SpreadsheetApp.flush();
+
+  return 'OK: TD:TV reconstruido. Ultimo real: linha ' + (lastReal >= 0 ? (lastReal + 3) : 'nenhuma') + '. Final previsto: ' + painel31_fmtNum_GE_(finalPrev) + '.';
+}
+
+function painel31_instalarGatilho_TDTV_GE() {
+  var ss = painel31_getSpreadsheet_GE_();
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction && triggers[i].getHandlerFunction() === 'painel31_onEdit_TDTV_GE') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  ScriptApp.newTrigger('painel31_onEdit_TDTV_GE').forSpreadsheet(ss).onEdit().create();
+  return 'OK: gatilho do painel TD:TV instalado.';
+}
+
+function painel31_onEdit_TDTV_GE(e) {
+  try {
+    if (!e || !e.range) {
+      return;
+    }
+    var sh = e.range.getSheet();
+    if (!sh || sh.getName() !== 'Histórico') {
+      return;
+    }
+    var row = e.range.getRow();
+    var col = e.range.getColumn();
+    if (row < 3 || row > 62) {
+      return;
+    }
+    if (col !== 4 && col !== 6) {
+      return;
+    }
+
+    // Se a V2 existir, recalcula antes para o painel ler a TY ja atualizada.
+    try {
+      if (typeof recalcularPrevisaoAoVivoGE === 'function') {
+        recalcularPrevisaoAoVivoGE();
+        Utilities.sleep(2500);
+      }
+    } catch (errV2) {
+      Logger.log('Painel31: V2 nao recalculou: ' + errV2);
+    }
+
+    painel31_reconstruir_TDTV_GE();
+  } catch (err) {
+    Logger.log('Painel31 onEdit erro: ' + err);
+  }
+}
+
+function painel31_prepararNovoDia_GE() {
+  try {
+    if (typeof instalarPrevisaoExternaGE === 'function') {
+      instalarPrevisaoExternaGE();
+    }
+  } catch (errInst) {
+    Logger.log('Painel31: instalarPrevisaoExternaGE falhou: ' + errInst);
+  }
+  try {
+    if (typeof recalcularPrevisaoAoVivoGE === 'function') {
+      recalcularPrevisaoAoVivoGE();
+      Utilities.sleep(2500);
+    }
+  } catch (errCalc) {
+    Logger.log('Painel31: recalcularPrevisaoAoVivoGE falhou: ' + errCalc);
+  }
+  return painel31_reconstruir_TDTV_GE();
+}
+
+function painel31_escreverResumo_GE_(sh, colTD, nCols, lastReal, fatorDia, finalPrev, TY, D, F) {
+  var resumo = [];
+  var prox5 = painel31_mediaProximos_GE_(TY, D, lastReal, Math.max(0, lastReal + 1), 5);
+  var temaProx = '';
+  if (lastReal + 1 >= 0 && lastReal + 1 < F.length) {
+    temaProx = F[lastReal + 1];
+  }
+
+  resumo.push(['RESUMO DO PAINEL TD:TV', '']);
+  resumo.push(['Ultimo minuto real', lastReal >= 0 ? painel31_hora_GE_(lastReal) : 'Sem real digitado']);
+  resumo.push(['Patamar do dia vs historico', painel31_fmtPct_GE_(fatorDia - 1)]);
+  resumo.push(['Media prevista final', painel31_fmtNum_GE_(finalPrev)]);
+  resumo.push(['Media proximos 5 min', painel31_fmtNum_GE_(prox5)]);
+  resumo.push(['Tema proximo minuto', temaProx || '']);
+  resumo.push(['Leitura', painel31_leituraGeral_GE_(fatorDia, prox5, finalPrev)]);
+  resumo.push(['Acao sugerida', painel31_acaoGeral_GE_(fatorDia, prox5, finalPrev)]);
+
+  var startRow = 66;
+  sh.getRange(startRow, colTD, resumo.length, 2).setValues(resumo);
+}
+
+function painel31_getSpreadsheet_GE_() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (ss) {
+      return ss;
+    }
+  } catch (err1) {}
+  if (typeof CFG !== 'undefined' && CFG && CFG.SPREADSHEET_ID) {
+    return SpreadsheetApp.openById(CFG.SPREADSHEET_ID);
+  }
+  return SpreadsheetApp.openById('11L0-jgTgMA3JOyuUfowsOzZ0svnC3AegNgekTA62LmI');
+}
+
+function painel31_acharCabecalho_GE_(sh, texto) {
+  var alvo = String(texto || '').toUpperCase();
+  var maxCol = sh.getLastColumn();
+  var rows = Math.min(2, sh.getMaxRows());
+  var vals = sh.getRange(1, 1, rows, maxCol).getValues();
+  for (var r = 0; r < vals.length; r++) {
+    for (var c = 0; c < vals[r].length; c++) {
+      var atual = String(vals[r][c] || '').toUpperCase();
+      if (atual === alvo) {
+        return c + 1;
+      }
+    }
+  }
+  return -1;
+}
+
+function painel31_fatorRecente_GE_(ratios, ate, padrao) {
+  var arr = [];
+  for (var i = Math.min(ate, ratios.length - 1); i >= 0 && arr.length < 5; i--) {
+    if (painel31_isNumero_GE_(ratios[i])) {
+      arr.push(ratios[i]);
+    }
+  }
+  var med = painel31_mediana_GE_(arr);
+  return painel31_isNumero_GE_(med) ? med : padrao;
+}
+
+function painel31_inclinacao_GE_(ratios, ate) {
+  var ult3 = [];
+  var ant5 = [];
+  for (var i = Math.min(ate, ratios.length - 1); i >= 0; i--) {
+    if (!painel31_isNumero_GE_(ratios[i])) {
+      continue;
+    }
+    if (ult3.length < 3) {
+      ult3.push(ratios[i]);
+    } else if (ant5.length < 5) {
+      ant5.push(ratios[i]);
+    }
+    if (ult3.length >= 3 && ant5.length >= 5) {
+      break;
+    }
+  }
+  if (ult3.length < 2 || ant5.length < 2) {
+    return 0;
+  }
+  return painel31_media_GE_(ult3) - painel31_media_GE_(ant5);
+}
+
+function painel31_ruptura_GE_(slope) {
+  if (!painel31_isNumero_GE_(slope)) {
+    return '';
+  }
+  if (slope >= 0.06) {
+    return 'ALTA FORTE';
+  }
+  if (slope >= 0.03) {
+    return 'ALTA';
+  }
+  if (slope <= -0.06) {
+    return 'QUEDA FORTE';
+  }
+  if (slope <= -0.03) {
+    return 'QUEDA';
+  }
+  return 'NAO';
+}
+
+function painel31_sinal_GE_(ratio, slope, fatorTema, real) {
+  if (!painel31_isNumero_GE_(ratio)) {
+    return '';
+  }
+  if (ratio >= 1.08 && slope >= 0.02) {
+    return real ? 'ALTA REAL' : 'ALTA PREVISTA';
+  }
+  if (ratio >= 1.03 && slope <= -0.03) {
+    return 'PERDE FOLEGO';
+  }
+  if (ratio < 0.94 && slope >= 0.02) {
+    return 'RECUPERACAO';
+  }
+  if (ratio < 0.92) {
+    return 'RISCO';
+  }
+  if (fatorTema >= 1.04) {
+    return 'TEMA AJUDA';
+  }
+  if (fatorTema <= 0.96) {
+    return 'TEMA PESA';
+  }
+  return 'ESTAVEL';
+}
+
+function painel31_sugestao_GE_(sinal, fatorTema, tema, duracao) {
+  if (!sinal) {
+    return '';
+  }
+  if (sinal === 'RISCO') {
+    return 'Antecipar tema forte';
+  }
+  if (sinal === 'PERDE FOLEGO') {
+    return 'Trocar bloco ou acelerar virada';
+  }
+  if (sinal === 'RECUPERACAO') {
+    return 'Segurar bloco; evitar break';
+  }
+  if (sinal === 'TEMA AJUDA') {
+    return 'Manter tema / alongar se render';
+  }
+  if (sinal === 'TEMA PESA') {
+    return 'Encurtar tema ou trocar';
+  }
+  if (duracao >= 8 && fatorTema < 1.02) {
+    return 'Bloco longo: preparar troca';
+  }
+  return 'Manter e observar';
+}
+
+function painel31_motivo_GE_(ratio, recente, slope, fatorTema, real) {
+  if (!painel31_isNumero_GE_(ratio)) {
+    return '';
+  }
+  var origem = real ? 'real' : 'proj';
+  return origem + ' vs hist ' + painel31_fmtPct_GE_(ratio - 1) +
+    ' | rec ' + painel31_fmtPct_GE_(recente - 1) +
+    ' | tend ' + painel31_fmtPct_GE_(slope) +
+    ' | tema ' + painel31_fmtPct_GE_(fatorTema - 1);
+}
+
+function painel31_prognostico_GE_(TY, D, lastReal, idx, finalPrev) {
+  var m5 = painel31_mediaProximos_GE_(TY, D, lastReal, idx, 5);
+  var texto = 'Final ' + painel31_fmtNum_GE_(finalPrev);
+  if (painel31_isNumero_GE_(m5)) {
+    texto += ' | prox.5 ' + painel31_fmtNum_GE_(m5);
+  }
+  if (idx <= lastReal) {
+    texto += ' | base real';
+  } else {
+    texto += ' | previsao';
+  }
+  return texto;
+}
+
+function painel31_foco_GE_(tema, fatorTema, duracao) {
+  if (!tema) {
+    return 'Sem tema';
+  }
+  if (fatorTema >= 1.04) {
+    return 'Tema impulsiona: ' + tema;
+  }
+  if (fatorTema <= 0.96) {
+    return 'Tema freia: ' + tema;
+  }
+  if (duracao >= 8) {
+    return 'Tema longo: ' + tema;
+  }
+  return 'Tema neutro: ' + tema;
+}
+
+function painel31_risco_GE_(ratio, slope, fatorTema) {
+  if (!painel31_isNumero_GE_(ratio)) {
+    return '';
+  }
+  if (ratio < 0.92 || slope <= -0.06 || fatorTema <= 0.94) {
+    return 'ALTO';
+  }
+  if (ratio < 0.98 || slope <= -0.03 || fatorTema <= 0.98) {
+    return 'MEDIO';
+  }
+  return 'BAIXO';
+}
+
+function painel31_resumoTema_GE_(fatorTema) {
+  if (!painel31_isNumero_GE_(fatorTema)) {
+    return '';
+  }
+  if (fatorTema >= 1.04) {
+    return 'AJUDA';
+  }
+  if (fatorTema <= 0.96) {
+    return 'PESA';
+  }
+  return 'NEUTRO';
+}
+
+function painel31_leituraGeral_GE_(fatorDia, prox5, finalPrev) {
+  if (fatorDia >= 1.06) {
+    return 'Dia acima da media; proteger patamar.';
+  }
+  if (fatorDia <= 0.94) {
+    return 'Dia abaixo da media; buscar recuperacao.';
+  }
+  return 'Dia proximo da media; decidir pelo tema.';
+}
+
+function painel31_acaoGeral_GE_(fatorDia, prox5, finalPrev) {
+  if (fatorDia <= 0.94) {
+    return 'Priorizar tema forte e evitar bloco fraco.';
+  }
+  if (fatorDia >= 1.06) {
+    return 'Manter o que segura audiencia; evitar risco.';
+  }
+  return 'Observar proximos 5 minutos e ajustar tema.';
+}
+
+function painel31_mediaFinalPrevista_GE_(D, TY, lastReal) {
+  var arr = [];
+  for (var i = 0; i < 60; i++) {
+    if (i <= lastReal && painel31_isNumero_GE_(D[i])) {
+      arr.push(D[i]);
+    } else if (painel31_isNumero_GE_(TY[i])) {
+      arr.push(TY[i]);
+    }
+  }
+  return painel31_media_GE_(arr);
+}
+
+function painel31_mediaProximos_GE_(TY, D, lastReal, idx, janela) {
+  var arr = [];
+  var ini = Math.max(0, idx);
+  var fim = Math.min(59, ini + janela - 1);
+  for (var i = ini; i <= fim; i++) {
+    if (i <= lastReal && painel31_isNumero_GE_(D[i])) {
+      arr.push(D[i]);
+    } else if (painel31_isNumero_GE_(TY[i])) {
+      arr.push(TY[i]);
+    }
+  }
+  return painel31_media_GE_(arr);
+}
+
+function painel31_media_GE_(arr) {
+  var s = 0;
+  var n = 0;
+  for (var i = 0; i < arr.length; i++) {
+    if (painel31_isNumero_GE_(arr[i])) {
+      s += arr[i];
+      n++;
+    }
+  }
+  return n > 0 ? s / n : null;
+}
+
+function painel31_mediana_GE_(arr) {
+  var a = [];
+  for (var i = 0; i < arr.length; i++) {
+    if (painel31_isNumero_GE_(arr[i])) {
+      a.push(arr[i]);
+    }
+  }
+  if (a.length === 0) {
+    return null;
+  }
+  a.sort(function(x, y) { return x - y; });
+  var mid = Math.floor(a.length / 2);
+  if (a.length % 2) {
+    return a[mid];
+  }
+  return (a[mid - 1] + a[mid]) / 2;
+}
+
+function painel31_num_GE_(v) {
+  if (typeof v === 'number' && isFinite(v)) {
+    return v;
+  }
+  if (v === null || v === undefined || v === '') {
+    return null;
+  }
+  var s = String(v).trim();
+  if (!s) {
+    return null;
+  }
+  s = s.replace('%', '');
+  if (s.indexOf(',') >= 0) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  }
+  var n = Number(s);
+  return isFinite(n) ? n : null;
+}
+
+function painel31_text_GE_(v) {
+  if (v === null || v === undefined) {
+    return '';
+  }
+  return String(v).trim();
+}
+
+function painel31_isNumero_GE_(v) {
+  return typeof v === 'number' && isFinite(v);
+}
+
+function painel31_numOuVazio_GE_(v) {
+  return painel31_isNumero_GE_(v) ? v : '';
+}
+
+function painel31_clamp_GE_(v, min, max) {
+  if (!painel31_isNumero_GE_(v)) {
+    return v;
+  }
+  if (v < min) {
+    return min;
+  }
+  if (v > max) {
+    return max;
+  }
+  return v;
+}
+
+function painel31_fmtPct_GE_(v) {
+  if (!painel31_isNumero_GE_(v)) {
+    return '';
+  }
+  var pct = Math.round(v * 1000) / 10;
+  var s = String(pct).replace('.', ',') + '%';
+  return pct > 0 ? '+' + s : s;
+}
+
+function painel31_fmtNum_GE_(v) {
+  if (!painel31_isNumero_GE_(v)) {
+    return '';
+  }
+  return String(Math.round(v * 100) / 100).replace('.', ',');
+}
+
+function painel31_hora_GE_(idx) {
+  var min = idx;
+  var hh = 18;
+  var mm = min;
+  return String(hh) + ':' + (mm < 10 ? '0' + mm : String(mm));
+}
+
+function painel31_colunaNumero_GE_(letras) {
+  var s = String(letras || '').toUpperCase();
+  var n = 0;
+  for (var i = 0; i < s.length; i++) {
+    n = n * 26 + (s.charCodeAt(i) - 64);
+  }
+  return n;
+}

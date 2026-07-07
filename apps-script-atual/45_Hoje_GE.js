@@ -10,7 +10,7 @@
 // reais da Hoje para o Histórico e traz de volta previsão e sinais.
 //
 // Colunas (linhas 3–62 = minutos 18:00–18:59):
-//  A HORA | B MÉDIA CTX | C PREVISÃO | D AUD OCR | E AUD MANUAL | F AUD FINAL
+//  A HORA | B MÉDIA ESPERADA | C PREVISÃO | D AUD OCR | E AUD MANUAL | F AUD FINAL
 //  G ORIGEM | H STATUS | I TEMA | J SUBTEMA | K DESVIO | L LEITURA
 //  M TEMA CERTO? | N POR QUÊ? | O SUSTENTAR | P PRÓXIMO TEMA | Q RISCO
 //  R AÇÃO | S OBS | T ÚLT. PROG
@@ -20,7 +20,7 @@ var HOJE_GE = {
     FIRST_ROW: 3,
     LAST_ROW: 62,
     N_MIN: 60,
-    HEADERS: ["HORA", "MÉDIA CTX", "PREVISÃO", "AUD OCR", "AUD MANUAL",
+    HEADERS: ["HORA", "MÉDIA ESPERADA", "PREVISÃO", "AUD OCR", "AUD MANUAL",
         "AUD FINAL", "ORIGEM", "STATUS", "TEMA", "SUBTEMA", "DESVIO",
         "LEITURA", "TEMA CERTO?", "POR QUÊ?", "SUSTENTAR", "PRÓXIMO TEMA",
         "RISCO", "AÇÃO", "OBS", "ÚLT. PROG", "MÉDIA HIST.", "SOMBRA", "Δ SOMBRA"
@@ -275,7 +275,30 @@ function sincronizarHojeComHistoricoGE_() {
         novoF.push([String(vals[i][HOJE_GE.COL.TEMA - 2] || "").trim() || temaHist]);
     }
 
-    grade.setValues(vals);
+    // GRAVAÇÃO CIRÚRGICA — nunca reescrever a grade inteira. Entre a leitura
+    // (foto da grade) e a escrita passam-se segundos; gravar a foto de volta
+    // apagava o que o usuário digitou (E/I) e o que o webhook OCR gravou (D)
+    // nesse intervalo — o "apagamento fantasma" do ao vivo. Só as colunas
+    // calculadas F/G/H são escritas em bloco; E e I célula a célula,
+    // reconferindo na hora da escrita que continuam vazias.
+    const fghOut = vals.map(r => [
+        r[HOJE_GE.COL.FINAL - 2], r[HOJE_GE.COL.ORIGEM - 2], r[HOJE_GE.COL.STATUS - 2]
+    ]);
+    sh.getRange(3, HOJE_GE.COL.FINAL, n, 3).setValues(fghOut);
+
+    const eAtual = sh.getRange(3, HOJE_GE.COL.MANUAL, n, 1).getValues();
+    const iAtual = sh.getRange(3, HOJE_GE.COL.TEMA, n, 1).getValues();
+    for (let i = 0; i < n; i++) {
+        const eNovo = vals[i][HOJE_GE.COL.MANUAL - 2];
+        if (typeof eNovo === "number" &&
+            (eAtual[i][0] === "" || eAtual[i][0] === null)) {
+            sh.getRange(3 + i, HOJE_GE.COL.MANUAL).setValue(eNovo);
+        }
+        const tNovo = String(vals[i][HOJE_GE.COL.TEMA - 2] || "").trim();
+        if (tNovo && String(iAtual[i][0] || "").trim() === "") {
+            sh.getRange(3 + i, HOJE_GE.COL.TEMA).setValue(tNovo);
+        }
+    }
 
     // Empurra apenas células com dado real novo (preserva fórmulas de projeção
     // nos minutos futuros e nunca apaga um real já existente no Histórico).
@@ -497,7 +520,10 @@ function atualizarDecisaoEditorialHojeGE_(sh, hist) {
         vals[i][HOJE_GE.COL.RISCO - 2] = String(painel.risco[i] || "");
         vals[i][HOJE_GE.COL.ACAO - 2] = String(painel.sugestao[i] || "");
     }
-    grade.setValues(vals);
+    // Escreve SÓ as colunas calculadas K..R — jamais a grade inteira, para
+    // não sobrescrever D (OCR), E (manual) e I (tema) com uma foto velha.
+    sh.getRange(3, HOJE_GE.COL.DESVIO, n, HOJE_GE.COL.ACAO - HOJE_GE.COL.DESVIO + 1)
+        .setValues(vals.map(r => r.slice(HOJE_GE.COL.DESVIO - 2, HOJE_GE.COL.ACAO - 1)));
 }
 
 function sustentarTemaGE_(sinal, ruptura, durBloco, minutoIdx, breaksGlobo) {

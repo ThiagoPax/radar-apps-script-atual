@@ -244,10 +244,10 @@ function montarHtmlDashboardGE_(d) {
     html += card("7 · Calendário dos clubes", linhasClubes.length ? kv(linhasClubes) :
         '<div style="font-size:13px;color:#7B7D7D;">Sem dados — verificar API-Football (menu Configurações → Testar API).</div>');
 
-    // 8. Recomendações
-    html += card("8 · Próximo programa",
-        '<ul style="margin:0;padding-left:18px;font-size:13px;color:#2C3E50;">' +
-        d.recomendacoes.map(r => "<li>" + r + "</li>").join("") + "</ul>");
+    // 8. "Próximo programa" removido: as recomendações automáticas de pauta
+    // (apostar em time X / evitar time Y) saíam de ranking histórico sem
+    // contexto de calendário — em período sem jogos viravam sugestão sem
+    // fundamento. Reintroduzir apenas se condicionado a jogo confirmado.
 
     html += '<div style="font-size:11px;color:#95A5A6;margin-top:8px;">Radar Gazeta Esportiva — gerado automaticamente às ' +
         Utilities.formatDate(new Date(), CFG.TIMEZONE, "HH:mm") + '</div></div>';

@@ -185,6 +185,62 @@ function repararFormulasQuebradasMenuGE() {
     } catch (e) {}
 }
 
+// --- Saneamento one-shot: remove projeções presas nas colunas históricas ---
+// Minutos sem captura arquivados COM a fórmula de projeção viram #REF!
+// (referência circular) e contaminam B/C/E e a calibragem. Esta função limpa
+// as fórmulas presas nas colunas históricas de AUDIÊNCIA (a do dia corrente,
+// D, fica intacta), regenera as fórmulas-base B/C/63 e a calibragem, e
+// repreenche a MÉDIA ESPERADA e a média histórica da aba Hoje.
+function sanearProjecoesHistoricoGE() {
+    var ss = SpreadsheetApp.getActive();
+    var sheet = ss.getSheetByName(CFG.GE_OUT_HISTORICO);
+    if (!sheet) throw new Error('Aba "' + CFG.GE_OUT_HISTORICO + '" não encontrada.');
+
+    var audCols = getAudColsGE_(sheet);
+    var limpas = 0;
+    for (var i = 0; i < audCols.length; i++) {
+        var col = audCols[i];
+        if (col === 4) continue; // dia corrente: projeções em D são legítimas
+        var forms = sheet.getRange(3, col, 60, 1).getFormulas();
+        for (var r = 0; r < 60; r++) {
+            if (forms[r][0]) {
+                sheet.getRange(3 + r, col).clearContent();
+                limpas++;
+            }
+        }
+    }
+
+    atualizarFormulasBaseGE_(sheet);
+    atualizarCalibragemGE_(sheet);
+    atualizarFatorTemaGE_(sheet);
+    SpreadsheetApp.flush();
+
+    // Repreenche as réguas da aba Hoje, que herdaram os buracos do #REF!
+    try {
+        var hoje = ss.getSheetByName(CFG.SHEET_HOJE);
+        if (hoje) {
+            hoje.getRange(2, 2).setValue(HOJE_GE.HEADERS[1]); // "MÉDIA ESPERADA"
+            preencherMediaContextualHojeGE_(hoje);
+            preencherMediaHistoricaHojeGE_(hoje);
+        }
+    } catch (e) {
+        Logger.log("[Saneamento] Réguas da Hoje: " + e);
+    }
+
+    var resumo = limpas + " projeções presas removidas das colunas históricas; " +
+        "fórmulas-base e calibragem regeneradas.";
+    Logger.log("[Saneamento] " + resumo);
+    try { logGE_("SANEAMENTO", resumo); } catch (e) {}
+    return resumo;
+}
+
+function sanearProjecoesHistoricoMenuGE() {
+    var resumo = sanearProjecoesHistoricoGE();
+    try {
+        SpreadsheetApp.getUi().alert("🩹 Saneamento concluído", resumo, SpreadsheetApp.getUi().ButtonSet.OK);
+    } catch (e) {}
+}
+
 function batchSetFormulasSparseSafeNoApiGE_(sheet, entries) {
     if (!entries || entries.length === 0) return;
     for (var i = 0; i < entries.length; i++) {
@@ -416,8 +472,11 @@ function atualizarFormulasBaseGE_(sheet) {
         if (closedCols.length === 0) {
             fB = '=""';  // sem histórico fechado: B vazio
         } else {
-            var sumParts = closedCols.map(function(c) { return columnToLetter_(c) + row; }).join("+");
-            fB = "=(" + sumParts + ")/" + closedCols.length;
+            // MÉDIA (ignora células vazias) em vez de soma/N: um minuto sem
+            // captura num dia arquivado ficava valendo 0 e puxava a média
+            // do minuto para baixo em todos os dias seguintes.
+            var medParts = closedCols.map(function(c) { return columnToLetter_(c) + row; }).join(";");
+            fB = '=SEERRO(MÉDIA(' + medParts + ');"")';
         }
         var fC = '=SE(OU(B' + row + '="";B' + row + '=0;D' + row + '="");"";D' + row + '/B' + row + '-1)';
         bcFormulas.push([fB, fC]);
@@ -431,7 +490,9 @@ function atualizarFormulasBaseGE_(sheet) {
         sparse.push({
             row: 63,
             col: audCols[i],
-            formula: "=(SOMA(" + colL + "3:" + colL + "62))/60"
+            // MÉDIA dos minutos preenchidos (dia com lacuna de captura não
+            // fica subestimado como na antiga SOMA/60).
+            formula: '=SEERRO(MÉDIA(' + colL + "3:" + colL + '62);"")'
         });
     }
     batchSetFormulasSparseSafeNoApiGE_(sheet, sparse);
@@ -1728,6 +1789,16 @@ function adicionarNovoDiaCoreGE_(programDate) {
                 : existing.toString().trim();
             if (existStr === dateStr) return { ok: false, motivo: "duplicada" };
         }
+    }
+
+    // ❶a Congela o dia que está sendo arquivado: célula de D com FÓRMULA é
+    //    projeção ao vivo de minuto nunca capturado — não é dado real. Se a
+    //    fórmula fosse arquivada, a inserção de colunas a deslocaria junto e
+    //    ela viraria referência circular (#REF!) na coluna histórica,
+    //    contaminando B/C/E e a calibragem em cascata.
+    var dFormsOld = sheet.getRange(3, 4, 60, 1).getFormulas();
+    for (var fz = 0; fz < 60; fz++) {
+        if (dFormsOld[fz][0]) sheet.getRange(3 + fz, 4).clearContent();
     }
 
     // ❶ Inserir bloco vazio D:G

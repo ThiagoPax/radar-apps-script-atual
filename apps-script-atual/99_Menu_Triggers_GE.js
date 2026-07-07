@@ -262,6 +262,14 @@ function geTickAoVivoGE() {
     if (minutos < 17 * 60 + 58 || minutos > 19 * 60 + 5) return;
     const dia = agora.getDay();
     if (dia === 0 || dia === 6) return;
+    try {
+        const cache = CacheService.getScriptCache();
+        const pend = cache.get("ocr_pendente");
+        if (pend) {
+            logGE_("TICK", "Consolidando OCR pendente do webhook (" + pend + " leituras).");
+            cache.remove("ocr_pendente");
+        }
+    } catch (e) { }
     try { atualizarHojeGE(); } catch (e) { logGE_("TICK", "⚠️ " + e.message); }
 }
 

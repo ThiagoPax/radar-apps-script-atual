@@ -27,31 +27,28 @@ var GE32_END_HOUR = 18;
 var GE32_END_MINUTE = 59;
 
 // Pequena espera para garantir que a planilha e a TY terminem de recalcular antes do painel ler os dados.
-var GE32_SLEEP_AFTER_TY_MS = 1800;
+// 500ms basta após o flush(); o valor antigo (1800) deixava o tick com ~4s e
+// serializava o webhook de audiência (timeout no agente OCR local).
+var GE32_SLEEP_AFTER_TY_MS = 500;
 
 // -----------------------------------------------------------------------------
 // INSTALAÇÃO
 // -----------------------------------------------------------------------------
 
+// DESATIVADO: este instalador criava um tick de 1 minuto (ge32_tickAoVivoGE)
+// que recalculava só o Histórico e NUNCA atualizava a aba Hoje. Rodando junto
+// com geTickAoVivoGE, os dois disputavam o lock e congelavam C e M–P.
+// O conjunto oficial de gatilhos é instalado por instalarTriggersGE() (arquivo 99),
+// cujo tick (geTickAoVivoGE → atualizarHojeGE) já cobre TY/Painel + cockpit Hoje.
 function ge32_instalarAtualizacaoAoVivoGE() {
   ge32_removerGatilhosGE();
-
-  var ss = SpreadsheetApp.openById(ge32_getSpreadsheetId_());
-
-  // Atualização automática: no Apps Script, o menor intervalo confiável é 1 minuto.
-  ScriptApp.newTrigger("ge32_tickAoVivoGE")
-    .timeBased()
-    .everyMinutes(1)
-    .create();
-
-  // Atualização por edição manual em D ou F.
-  ScriptApp.newTrigger("ge32_onEditManualGE")
-    .forSpreadsheet(ss)
-    .onEdit()
-    .create();
-
-  Logger.log("OK: gatilhos GE32 instalados. A cada 1 minuto entre 18:00 e 18:59 BRT + onEdit em D/F.");
-  return "OK: gatilhos instalados.";
+  if (typeof instalarTriggersGE === "function") {
+    instalarTriggersGE();
+    Logger.log("GE32: instalador legado delegou para instalarTriggersGE().");
+    return "OK: gatilhos oficiais instalados via instalarTriggersGE().";
+  }
+  Logger.log("GE32: instalador legado desativado — rode instalarTriggersGE() (arquivo 99).");
+  return "DESATIVADO: rode instalarTriggersGE().";
 }
 
 function ge32_removerGatilhosGE() {
@@ -132,7 +129,17 @@ function ge32_atualizarTYPainelAgora_(fonte) {
   var lock = LockService.getScriptLock();
 
   // Evita duas execuções simultâneas: por exemplo, onEdit + gatilho de minuto.
-  if (!lock.tryLock(2500)) {
+  // No caminho do tick da aba Hoje ("hoje_sync") espera de verdade: se desistir,
+  // a coluna C e o bloco M–P ficam com projeção/painel velhos até o próximo tick
+  // que ganhar a corrida. Nos caminhos de onEdit mantém a espera curta para não
+  // travar a digitação do usuário.
+  var obteveLock;
+  if (fonte === "hoje_sync") {
+    try { lock.waitLock(15000); obteveLock = true; } catch (eLock) { obteveLock = false; }
+  } else {
+    obteveLock = lock.tryLock(2500);
+  }
+  if (!obteveLock) {
     Logger.log("GE32 ignorado: já há outra atualização em andamento. Fonte: " + fonte);
     return "IGNORADO: outra atualização em andamento.";
   }

@@ -80,7 +80,9 @@ var PV2 = {
     API_TIMEOUT_MS: 8000,
     THROTTLE_S: 3,
     // V6: espera fórmulas UA/UB/UD recalcularem após editar F antes de ler a planilha.
-    WAIT_FORMULAS_MS: 2200
+    // 800ms + flush() é suficiente; o valor antigo (2200) serializava o tick e
+    // derrubava o webhook de audiência por timeout no cliente.
+    WAIT_FORMULAS_MS: 800
 };
 
 function betaPV2_(m) { // m = 0..59

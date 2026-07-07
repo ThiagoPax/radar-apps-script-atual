@@ -2050,7 +2050,7 @@ function executarAtualizacaoHistoricoGECompleta() {
         }
         etapas.push("2. Calibragem ✅");
         SpreadsheetApp.flush();
-        Utilities.sleep(1500); // folga antes da próxima fase pesada (quota)
+        Utilities.sleep(500); // folga antes da próxima fase pesada (quota)
     } catch (e2) {
         etapas.push("2. Calibragem ❌ " + e2.message);
     }
@@ -2069,7 +2069,7 @@ function executarAtualizacaoHistoricoGECompleta() {
             etapas.push("3. Média por Tema ⚠️ " + ((resTema && resTema.msg) ? resTema.msg : "falhou"));
         }
         SpreadsheetApp.flush();
-        Utilities.sleep(1500);
+        Utilities.sleep(500);
     } catch (e3) {
         etapas.push("3. Média por Tema ❌ " + e3.message);
     }

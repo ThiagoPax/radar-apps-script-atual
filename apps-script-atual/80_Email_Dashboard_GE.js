@@ -172,13 +172,40 @@ function montarHtmlDashboardGE_(d) {
         ["Leitura", '<span style="color:' + corLeitura + ';">' + (d.leitura || "—") + '</span>']
     ]));
 
-    // 2. Resumo editorial
-    html += card("2 · Resumo editorial",
+    // 2. Resumo do Programa (IA) — gerado na importação da transcrição; reusa o
+    // cache do dia. Sem cache mas com termos processados, tenta gerar na hora.
+    let topTermos = [];
+    try { topTermos = (typeof lerTopTermosDoDiaGE_ === "function") ? lerTopTermosDoDiaGE_() : []; } catch (e) { }
+    let resumoIA = null;
+    try { resumoIA = (typeof obterResumoIADoDiaGE_ === "function") ? obterResumoIADoDiaGE_() : null; } catch (e) { }
+    if ((!resumoIA || !resumoIA.length) && topTermos.length) {
+        try { resumoIA = gerarRelatorioGE_(null).resumo; } catch (e) { }
+    }
+    html += card("2 · Resumo do Programa (IA)",
+        (resumoIA && resumoIA.length)
+            ? resumoIA.map(f => '<p style="margin:4px 0;font-size:13px;color:#2C3E50;">' + f + '</p>').join("")
+            : '<div style="font-size:13px;color:#7B7D7D;">Sem transcrição processada hoje.</div>');
+
+    // 3. Top 5 termos mais falados (aba Termos)
+    html += card("3 · Top 5 Termos Mais Falados",
+        topTermos.length
+            ? '<table style="font-size:12px;border-collapse:collapse;width:100%;">' +
+              '<tr style="color:#7B7D7D;text-align:left;"><th style="padding:3px 8px 3px 0;">Termo</th>' +
+              '<th style="padding:3px 8px;">Menções</th><th style="padding:3px 0;">Minutos</th></tr>' +
+              topTermos.map(t =>
+                  '<tr><td style="padding:3px 8px 3px 0;font-weight:bold;">' + t.termo +
+                  '</td><td style="padding:3px 8px;">' + t.contagem +
+                  '</td><td style="padding:3px 0;">' + t.minutos + '</td></tr>').join("") +
+              '</table>'
+            : '<div style="font-size:13px;color:#7B7D7D;">Sem termos processados hoje.</div>');
+
+    // 4. Resumo editorial
+    html += card("4 · Resumo editorial",
         '<ul style="margin:0;padding-left:18px;font-size:13px;color:#2C3E50;">' +
         d.bullets.map(b => "<li>" + b + "</li>").join("") + "</ul>");
 
-    // 3. Audiência comparada
-    html += card("3 · Audiência comparada", kv([
+    // 5. Audiência comparada
+    html += card("5 · Audiência comparada", kv([
         ["Média do programa", num(d.mediaDia)],
         ["Mesmo dia da semana", num(d.reguas.mesmoDia)],
         ["Últimos 3 programas", num(d.reguas.ultimos3)],
@@ -186,7 +213,7 @@ function montarHtmlDashboardGE_(d) {
         ["Média histórica geral", num(d.reguas.geral)]
     ]));
 
-    // 4. Temas
+    // 6. Temas
     let temasHtml = "";
     if (d.temas.length) {
         temasHtml = '<table style="font-size:12px;border-collapse:collapse;width:100%;">' +
@@ -203,9 +230,9 @@ function montarHtmlDashboardGE_(d) {
             '<div style="font-size:12px;color:#7B7D7D;margin-top:6px;">Melhor: ' +
             (d.temaMelhor || "—") + ' · Pior: ' + (d.temaPior || "—") + '</div>';
     } else temasHtml = '<div style="font-size:13px;color:#7B7D7D;">Sem temas processados hoje.</div>';
-    html += card("4 · Temas", temasHtml);
+    html += card("6 · Temas", temasHtml);
 
-    // 5. Fala por pessoa
+    // 7. Fala por pessoa
     let comHtml;
     if (d.comentaristas.length) {
         comHtml = kv(d.comentaristas.map(c => [c.nome,
@@ -214,9 +241,9 @@ function montarHtmlDashboardGE_(d) {
         comHtml = '<div style="font-size:13px;color:#7B7D7D;">Sem dados de escalação/fala ' +
             'registrados hoje (preencher comentaristas do dia no Histórico, linhas 64–65).</div>';
     }
-    html += card("5 · Mesa / comentaristas", comHtml);
+    html += card("7 · Mesa / comentaristas", comHtml);
 
-    // 6. Breaks Globo
+    // 8. Breaks Globo
     let breaksHtml = '<div style="font-size:13px;color:#7B7D7D;">Sem padrão registrado — alimentar a aba Breaks.</div>';
     if (d.breaks && d.breaks.janelas && d.breaks.janelas.length) {
         breaksHtml = '<div style="font-size:13px;color:#2C3E50;">Padrão esperado: ' +
@@ -225,9 +252,9 @@ function montarHtmlDashboardGE_(d) {
             (d.breaks.alerta ? '<div style="font-size:12px;color:#7B7D7D;margin-top:4px;">' +
                 d.breaks.alerta + '</div>' : "");
     }
-    html += card("6 · Breaks Globo", breaksHtml);
+    html += card("8 · Breaks Globo", breaksHtml);
 
-    // 7. Clubes
+    // 9. Clubes
     const linhasClubes = [];
     for (const c of CFG.CLUBES_FOCO) {
         const info = (d.clubes || {})[c];
@@ -241,10 +268,10 @@ function montarHtmlDashboardGE_(d) {
         if (info.proximoJogo) txt += (txt !== "—" ? " · " : "") + "Joga " + info.proximoJogo;
         linhasClubes.push([formatTemaDisplay_(c), txt]);
     }
-    html += card("7 · Calendário dos clubes", linhasClubes.length ? kv(linhasClubes) :
+    html += card("9 · Calendário dos clubes", linhasClubes.length ? kv(linhasClubes) :
         '<div style="font-size:13px;color:#7B7D7D;">Sem dados — verificar API-Football (menu Configurações → Testar API).</div>');
 
-    // 8. "Próximo programa" removido: as recomendações automáticas de pauta
+    // 10. "Próximo programa" removido: as recomendações automáticas de pauta
     // (apostar em time X / evitar time Y) saíam de ranking histórico sem
     // contexto de calendário — em período sem jogos viravam sugestão sem
     // fundamento. Reintroduzir apenas se condicionado a jogo confirmado.

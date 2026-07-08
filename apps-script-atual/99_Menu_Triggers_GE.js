@@ -300,7 +300,7 @@ function geAlertaTranscricaoGE() {
             subject: "⚠️ Gazeta Esportiva — transcrição não encontrada (" +
                 Utilities.formatDate(new Date(), CFG.TIMEZONE, "dd/MM") + ")",
             body: "A transcrição do programa de hoje não foi localizada no Drive até as 19:15.\n\n" +
-                "Verifique a pasta de transcrições (arquivo transcricao_DDMMYY.xlsx) ou importe " +
+                "Verifique a pasta de transcrições (arquivo transcricao_DDMMYY.xlsx ou transcricao_YYMMDD.xlsx) ou importe " +
                 "manualmente pelo menu 📺 Gazeta Esportiva Radar → Importar transcrição do dia."
         });
     }

@@ -108,10 +108,12 @@ function gerarRelatorioGE_(e) {
                 m.push(e)
             }
     }
+    const resumo = gerarResumoComIA_GE_(l, d, m, a, u);
+    salvarResumoIADoDiaGE_(o, resumo);
     return {
         data: a,
         diaSemana: r,
-        resumo: gerarResumoComIA_GE_(l, d, m, a, u),
+        resumo: resumo,
         macrotemas: l,
         subtemas: d,
         topTermos: u
@@ -150,6 +152,42 @@ function gerarResumoComIA_GE_(e, t, o, a, r) {
         Logger.log("Erro ao gerar resumo GE com IA: " + e.message)
     }
     return ["N\xe3o foi poss\xedvel gerar o resumo automaticamente."]
+}
+
+// --- Cache diário do resumo IA (reusado pelo dashboard das 21:00) ---
+
+function chaveResumoIAGE_(data) {
+    return "resumo_ia_" + Utilities.formatDate(data || new Date(), CFG.TIMEZONE, "yyyy-MM-dd");
+}
+
+function salvarResumoIADoDiaGE_(data, resumo) {
+    try {
+        const texto = (resumo && resumo.length) ? String(resumo[0]) : "";
+        // Não cacheia os stubs de indisponibilidade — o dashboard tenta de novo.
+        if (!texto || /não disponível|não foi possível/i.test(texto)) return;
+        PropertiesService.getScriptProperties()
+            .setProperty(chaveResumoIAGE_(data), JSON.stringify(resumo));
+    } catch (e) { }
+}
+
+function obterResumoIADoDiaGE_() {
+    try {
+        const salvo = PropertiesService.getScriptProperties()
+            .getProperty(chaveResumoIAGE_(new Date()));
+        if (salvo) return JSON.parse(salvo);
+    } catch (e) { }
+    return null;
+}
+
+// Top 5 termos da aba Termos (TERMO / CONTAGEM / MIN) — mesma leitura do relatório.
+function lerTopTermosDoDiaGE_() {
+    try {
+        const sh = SpreadsheetApp.getActive().getSheetByName(CFG.GE_OUT_TOP);
+        if (!sh || sh.getLastRow() < 2) return [];
+        const vals = sh.getRange(2, 1, Math.min(sh.getLastRow() - 1, 5), 3).getValues();
+        return vals.filter(r => r[0] && "" !== r[0])
+            .map(r => ({ termo: r[0], contagem: r[1], minutos: r[2] }));
+    } catch (e) { return []; }
 }
 
 // --- Envio de email de relatório GE ---

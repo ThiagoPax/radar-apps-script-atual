@@ -262,6 +262,14 @@ function geTickAoVivoGE() {
     if (minutos < 17 * 60 + 58 || minutos > 19 * 60 + 5) return;
     const dia = agora.getDay();
     if (dia === 0 || dia === 6) return;
+    try {
+        const cache = CacheService.getScriptCache();
+        const pend = cache.get("ocr_pendente");
+        if (pend) {
+            logGE_("TICK", "Consolidando OCR pendente do webhook (" + pend + " leituras).");
+            cache.remove("ocr_pendente");
+        }
+    } catch (e) { }
     try { atualizarHojeGE(); } catch (e) { logGE_("TICK", "⚠️ " + e.message); }
 }
 
@@ -292,7 +300,7 @@ function geAlertaTranscricaoGE() {
             subject: "⚠️ Gazeta Esportiva — transcrição não encontrada (" +
                 Utilities.formatDate(new Date(), CFG.TIMEZONE, "dd/MM") + ")",
             body: "A transcrição do programa de hoje não foi localizada no Drive até as 19:15.\n\n" +
-                "Verifique a pasta de transcrições (arquivo transcricao_DDMMYY.xlsx) ou importe " +
+                "Verifique a pasta de transcrições (arquivo transcricao_DDMMYY.xlsx ou transcricao_YYMMDD.xlsx) ou importe " +
                 "manualmente pelo menu 📺 Gazeta Esportiva Radar → Importar transcrição do dia."
         });
     }

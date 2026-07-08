@@ -314,6 +314,7 @@ function listarArquivosSpeechCandidatosNoDrive_(folderId) {
         const nameAccepted = isNomeArquivoSpeechAceito_(name);
         let parsed = null;
         let programDate = null;
+        let dateCandidates = [];
         let accepted = !1;
         let reason = "";
         Logger.log("[Speech] Encontrado no Drive | nome: " + name + " | mimeType: " + mimeType + " | criado: " + formatLogDate_(createdAt) + " | modificado: " + formatLogDate_(updatedAt));
@@ -327,7 +328,10 @@ function listarArquivosSpeechCandidatosNoDrive_(folderId) {
             if (!parsed.lines || parsed.lines.length === 0) {
                 reason = "xlsx_sem_linhas";
             } else {
-                programDate = extrairDataDoNomeArquivoSpeech_(name) || extrairDataProgramaSpeech_(parsed.youtubeTitle, name, updatedAt);
+                dateCandidates = extrairDatasCandidatasDoNomeArquivoSpeech_(name);
+                programDate = (dateCandidates.length ? dateCandidates[0] : null) ||
+                    extrairDataProgramaSpeech_(parsed.youtubeTitle, name, updatedAt);
+                if (!dateCandidates.length && programDate) dateCandidates = [programDate];
                 accepted = !0;
                 reason = programDate ? "candidato_valido_com_data" : "candidato_valido_sem_data";
             }
@@ -343,7 +347,8 @@ function listarArquivosSpeechCandidatosNoDrive_(folderId) {
             createdAt: createdAt,
             lastUpdated: updatedAt,
             parsed: parsed,
-            programDate: programDate
+            programDate: programDate,
+            dateCandidates: dateCandidates
         });
     }
     return candidates;
@@ -354,7 +359,16 @@ function escolherMelhorArquivoSpeechNoDrive_(candidates, options) {
     if (!candidates || candidates.length === 0) return null;
     const expectedDate = normalizeDateOnly_(opts.expectedDate || new Date());
     const expectedKey = expectedDate ? formatDateKey_(expectedDate) : "";
-    const datedMatches = candidates.filter(candidate => candidate.programDate && formatDateKey_(candidate.programDate) === expectedKey);
+    const datasDoCandidato_ = candidate =>
+        (candidate.dateCandidates && candidate.dateCandidates.length)
+            ? candidate.dateCandidates
+            : (candidate.programDate ? [candidate.programDate] : []);
+    const datedMatches = candidates.filter(candidate => {
+        const dataBate = datasDoCandidato_(candidate)
+            .find(dt => formatDateKey_(dt) === expectedKey);
+        if (dataBate) candidate.programDate = dataBate;
+        return !!dataBate;
+    });
     if (datedMatches.length > 0) {
         const bestDated = sortSpeechCandidatesByRecency_(datedMatches)[0];
         bestDated.selectionReason = "data_correspondente_ao_dia";
@@ -366,8 +380,9 @@ function escolherMelhorArquivoSpeechNoDrive_(candidates, options) {
     const fallback = sortSpeechCandidatesByRecency_(candidates)[0];
     const modificadoHoje = fallback.lastUpdated &&
         formatDateKey_(normalizeDateOnly_(fallback.lastUpdated)) === expectedKey;
-    const dataDivergente = fallback.programDate &&
-        formatDateKey_(fallback.programDate) !== expectedKey;
+    const datasFallback = datasDoCandidato_(fallback);
+    const dataDivergente = datasFallback.length > 0 &&
+        !datasFallback.some(dt => formatDateKey_(dt) === expectedKey);
     if (!modificadoHoje || dataDivergente) {
         Logger.log("[Speech] Nenhum candidato do dia " + expectedKey +
             "; candidato mais recente rejeitado (" +
@@ -390,15 +405,42 @@ function sortSpeechCandidatesByRecency_(candidates) {
 }
 
 function extrairDataDoNomeArquivoSpeech_(fileName) {
+    const datas = extrairDatasCandidatasDoNomeArquivoSpeech_(fileName);
+    return datas.length ? datas[0] : null;
+}
+
+// O bloco de 6 dígitos do nome pode estar em DDMMYY (transcricao070726.xlsx)
+// ou YYMMDD (transcricao260707.xlsx) — os dois formatos circulam na pasta do
+// Drive. Retorna todas as interpretações válidas; a escolha do arquivo decide
+// qual delas bate com a data esperada do programa.
+function extrairDatasCandidatasDoNomeArquivoSpeech_(fileName) {
     const name = (fileName || "").toString();
     const match = name.match(/^transcricao(?:[_-]?)(\d{6})\.xlsx$/i);
-    if (!match) return null;
+    if (!match) return [];
     const digits = match[1];
-    const day = parseInt(digits.substring(0, 2), 10);
-    const month = parseInt(digits.substring(2, 4), 10);
-    const year = 2000 + parseInt(digits.substring(4, 6), 10);
-    if (day < 1 || day > 31 || month < 1 || month > 12) return null;
-    return new Date(year, month - 1, day);
+    const combos = [
+        { // DDMMYY
+            day: parseInt(digits.substring(0, 2), 10),
+            month: parseInt(digits.substring(2, 4), 10),
+            year: 2000 + parseInt(digits.substring(4, 6), 10)
+        },
+        { // YYMMDD
+            year: 2000 + parseInt(digits.substring(0, 2), 10),
+            month: parseInt(digits.substring(2, 4), 10),
+            day: parseInt(digits.substring(4, 6), 10)
+        }
+    ];
+    const datas = [];
+    const vistos = {};
+    combos.forEach(c => {
+        if (c.day < 1 || c.day > 31 || c.month < 1 || c.month > 12) return;
+        const dt = new Date(c.year, c.month - 1, c.day);
+        if (!vistos[dt.getTime()]) {
+            vistos[dt.getTime()] = true;
+            datas.push(dt);
+        }
+    });
+    return datas;
 }
 
 function isNomeArquivoSpeechAceito_(fileName) {

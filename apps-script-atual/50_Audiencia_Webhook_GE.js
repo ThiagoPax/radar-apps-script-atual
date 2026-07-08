@@ -361,6 +361,12 @@ function gravarAudienciasGEBatchFast_(payload) {
 
   var elapsedMs = new Date().getTime() - startedAt.getTime();
 
+  // Sinaliza ao tick de 1 min que há OCR recém-gravado em D aguardando
+  // consolidação (setValue não dispara onEdit). Cache é barato e não atrasa o doPost.
+  try {
+    CacheService.getScriptCache().put("ocr_pendente", String(ok.length), 300);
+  } catch (eCache) {}
+
   return {
     success: true,
     ok: true,

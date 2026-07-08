@@ -66,15 +66,17 @@ function gerarPDFAudienciaGE() {
     Utilities.sleep(1500); // gráfico precisa renderizar antes do export
 
     // --- Export para PDF (paisagem, 1 página) ---
-    const url = "https://docs.google.com/spreadsheets/d/" + ss.getId() + "/export" +
+    // scale=4 (ajustar à página) NÃO pode ser combinado com fitw/fith — a
+    // mistura dos dois modos de ajuste é o que derrubava o export com 500.
+    const base = "https://docs.google.com/spreadsheets/d/" + ss.getId() + "/export" +
         "?format=pdf&gid=" + pdfSheet.getSheetId() +
-        "&size=A4&portrait=false&fitw=true&fith=true&scale=4" +
+        "&size=A4&portrait=false&scale=4" +
         "&gridlines=false&printtitle=false&sheetnames=false&pagenum=false" +
-        "&top_margin=0.30&bottom_margin=0.30&left_margin=0.30&right_margin=0.30" +
-        "&r1=0&c1=0&r2=70&c2=15";
-    const blob = UrlFetchApp.fetch(url, {
-        headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() }
-    }).getBlob().setName("Audiencia_GE_" +
+        "&top_margin=0.30&bottom_margin=0.30&left_margin=0.30&right_margin=0.30";
+    const blob = exportarPdfComRetryGE_([
+        base + "&r1=0&c1=0&r2=70&c2=15", // 1ª opção: só o bloco usado da aba
+        base                              // fallback: aba inteira
+    ]).setName("Audiencia_GE_" +
         Utilities.formatDate(new Date(), CFG.TIMEZONE, "yyyy-MM-dd") + ".pdf");
 
     // Salva na mesma pasta da planilha (ou raiz)
@@ -87,6 +89,27 @@ function gerarPDFAudienciaGE() {
     }
     logGE_("PDF", "PDF gerado: " + arquivo.getUrl());
     return arquivo;
+}
+
+// O endpoint de export do Docs falha com 500 esporádico (recalculo em curso,
+// gráfico ainda renderizando). Tenta cada URL até 3x com backoff antes de desistir.
+function exportarPdfComRetryGE_(urls) {
+    const token = ScriptApp.getOAuthToken();
+    let ultimoErro = "";
+    for (const url of urls) {
+        for (let tentativa = 1; tentativa <= 3; tentativa++) {
+            const resp = UrlFetchApp.fetch(url, {
+                headers: { Authorization: "Bearer " + token },
+                muteHttpExceptions: true
+            });
+            const code = resp.getResponseCode();
+            if (code === 200) return resp.getBlob();
+            ultimoErro = "HTTP " + code;
+            logGE_("PDF", "Export falhou (" + ultimoErro + "), tentativa " + tentativa + "/3");
+            Utilities.sleep(1000 * Math.pow(2, tentativa - 1)); // 1s, 2s, 4s
+        }
+    }
+    throw Error("Export do PDF falhou após todas as tentativas (" + ultimoErro + ").");
 }
 
 function gerarPDFAudienciaMenuGE() {

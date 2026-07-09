@@ -80,9 +80,9 @@ var PV2 = {
     API_TIMEOUT_MS: 8000,
     THROTTLE_S: 3,
     // V6: espera fórmulas UA/UB/UD recalcularem após editar F antes de ler a planilha.
-    // 800ms + flush() é suficiente; o valor antigo (2200) serializava o tick e
-    // derrubava o webhook de audiência por timeout no cliente.
-    WAIT_FORMULAS_MS: 800
+    // 300ms + flush() é suficiente; valores altos serializavam o tick e
+    // derrubavam o webhook de audiência por timeout no cliente.
+    WAIT_FORMULAS_MS: 300
 };
 
 function betaPV2_(m) { // m = 0..59
@@ -347,7 +347,11 @@ function lerContextoPV2_() {
     // 2) se ela estiver com #ERROR ou sem fator para o tema, calcula fallback direto do histórico fechado.
     // Isso garante que F3:F62 afete a TY mesmo quando a aba TEMA estiver quebrada.
     var fatores = lerFatoresTemaPlanilhaPV2_(ss);
-    var fatoresHist = calcularFatoresTemaHistoricoPV2_(sheet);
+    // Fatores históricos dependem só de dias FECHADOS — não mudam durante o
+    // programa. Vêm de cache diário; sem cache, calcula uma vez e guarda
+    // (elimina 2 leituras do grid inteiro + ~260 getValue por tick).
+    var fatCache = obterFatoresHistoricosPV2_(sheet);
+    var fatoresHist = fatCache.hist || {};
     var usadosHistorico = 0;
     for (var th in fatoresHist) {
         if (!fatores[th] || !fatores[th].fator || fatores[th].n < 3) {
@@ -359,7 +363,7 @@ function lerContextoPV2_() {
     // V6: fator específico por minuto.
     // Exemplo: BREAK/MERCHAN às 18:26 pode ter comportamento diferente de BREAK/MERCHAN às 18:05.
     // Isso é o que faz a coluna F mexer na TY de forma visível, sem tirar o peso do patamar real de D.
-    var fatoresMinuto = calcularFatoresTemaMinutoHistoricoPV2_(sheet);
+    var fatoresMinuto = fatCache.minuto || {};
 
     return {
         sheet: sheet,
@@ -376,6 +380,49 @@ function lerContextoPV2_() {
             minuto: Object.keys(fatoresMinuto || {}).length
         }
     };
+}
+
+// -----------------------------------------------------------------------------
+// Cache diário dos fatores históricos (tema e tema-por-minuto)
+// -----------------------------------------------------------------------------
+var PV2_FATORES_CACHE_KEY = "pv2_fatores_v1";
+
+function obterFatoresHistoricosPV2_(sheet) {
+    var hoje = Utilities.formatDate(new Date(), CFG.TIMEZONE, "yyyy-MM-dd");
+    try {
+        var cached = CacheService.getScriptCache().get(PV2_FATORES_CACHE_KEY);
+        if (cached) {
+            var obj = JSON.parse(cached);
+            if (obj && obj.dia === hoje) return obj;
+        }
+    } catch (e) { }
+    return aquecerCacheFatoresPV2_(sheet);
+}
+
+function aquecerCacheFatoresPV2_(sheet) {
+    var obj = {
+        dia: Utilities.formatDate(new Date(), CFG.TIMEZONE, "yyyy-MM-dd"),
+        hist: calcularFatoresTemaHistoricoPV2_(sheet),
+        minuto: calcularFatoresTemaMinutoHistoricoPV2_(sheet)
+    };
+    // Arredonda para caber no CacheService (limite ~100KB por chave).
+    for (var t in obj.minuto) {
+        var fm = obj.minuto[t];
+        if (fm && fm.fatores) fm.fatores = fm.fatores.map(function (f) { return Math.round(f * 1000) / 1000; });
+    }
+    try {
+        CacheService.getScriptCache().put(PV2_FATORES_CACHE_KEY, JSON.stringify(obj), 21600);
+    } catch (e) {
+        Logger.log("[PV2] cache de fatores não coube/salvou: " + e.message);
+    }
+    return obj;
+}
+
+// Público — chamado pela rotina da manhã e pelo gatilho de aquecimento (~17:50),
+// para o primeiro tick do ao vivo já encontrar o cache pronto.
+function precomputarFatoresTemaPV2GE() {
+    var sheet = SpreadsheetApp.getActive().getSheetByName(CFG.GE_OUT_HISTORICO);
+    if (sheet) aquecerCacheFatoresPV2_(sheet);
 }
 
 // Lê os fatores já calculados na aba GE - Média por Minuto TEMA.

@@ -15,7 +15,7 @@ function gerarPDFAudienciaGE() {
     pdfSheet.clear();
     for (const ch of pdfSheet.getCharts()) pdfSheet.removeChart(ch);
     if (pdfSheet.getMaxRows() < 80) pdfSheet.insertRowsAfter(pdfSheet.getMaxRows(), 80 - pdfSheet.getMaxRows());
-    if (pdfSheet.getMaxColumns() < 16) pdfSheet.insertColumnsAfter(pdfSheet.getMaxColumns(), 16 - pdfSheet.getMaxColumns());
+    if (pdfSheet.getMaxColumns() < 20) pdfSheet.insertColumnsAfter(pdfSheet.getMaxColumns(), 20 - pdfSheet.getMaxColumns());
 
     pdfSheet.getRange(1, 1).setValue("GAZETA ESPORTIVA — AUDIÊNCIA MINUTO A MINUTO — " + dataStr)
         .setFontWeight("bold").setFontSize(14);
@@ -33,15 +33,21 @@ function gerarPDFAudienciaGE() {
     pdfSheet.getRange(2, 9).setFontWeight("bold");
     pdfSheet.getRange(3, 10, leitura.length - 1, 1).setNumberFormat("@");
 
-    // Gráfico (mesmas séries do cockpit)
+    // Séries auxiliares do gráfico copiadas para R/S (fora da área impressa,
+    // que vai até a coluna P). Com TODOS os dados na própria aba PDF, o
+    // gráfico sobrevive ao copyTo para a planilha temporária de export.
+    pdfSheet.getRange(2, 18, 61, 1).setValues(hojeSheet.getRange(2, 20, 61, 1).getValues()); // R = ÚLT. PROG
+    pdfSheet.getRange(2, 19, 61, 1).setValues(hojeSheet.getRange(2, 21, 61, 1).getValues()); // S = MÉDIA HIST.
+
+    // Gráfico (mesmas séries do cockpit), com ranges da própria aba PDF
     const chart = pdfSheet.newChart()
         .setChartType(Charts.ChartType.LINE)
-        .addRange(hojeSheet.getRange(2, 1, 61, 1))
-        .addRange(hojeSheet.getRange(2, 21, 61, 1))
-        .addRange(hojeSheet.getRange(2, 2, 61, 1))
-        .addRange(hojeSheet.getRange(2, 20, 61, 1))
-        .addRange(hojeSheet.getRange(2, 6, 61, 1))
-        .addRange(hojeSheet.getRange(2, 3, 61, 1))
+        .addRange(pdfSheet.getRange(2, 1, 61, 1))  // A = HORA
+        .addRange(pdfSheet.getRange(2, 19, 61, 1)) // S = MÉDIA HIST.
+        .addRange(pdfSheet.getRange(2, 2, 61, 1))  // B = MÉDIA ESPERADA
+        .addRange(pdfSheet.getRange(2, 18, 61, 1)) // R = ÚLT. PROG
+        .addRange(pdfSheet.getRange(2, 6, 61, 1))  // F = AUD FINAL
+        .addRange(pdfSheet.getRange(2, 3, 61, 1))  // C = PREVISÃO
         .setNumHeaders(1)
         .setOption("title", "Hoje x Contexto x Previsão — " + dataStr)
         .setOption("useFirstColumnAsDomain", true)
@@ -65,19 +71,33 @@ function gerarPDFAudienciaGE() {
     SpreadsheetApp.flush();
     Utilities.sleep(1500); // gráfico precisa renderizar antes do export
 
-    // --- Export para PDF (paisagem, 1 página) ---
-    // scale=4 (ajustar à página) NÃO pode ser combinado com fitw/fith — a
-    // mistura dos dois modos de ajuste é o que derrubava o export com 500.
-    const base = "https://docs.google.com/spreadsheets/d/" + ss.getId() + "/export" +
-        "?format=pdf&gid=" + pdfSheet.getSheetId() +
-        "&size=A4&portrait=false&scale=4" +
-        "&gridlines=false&printtitle=false&sheetnames=false&pagenum=false" +
-        "&top_margin=0.30&bottom_margin=0.30&left_margin=0.30&right_margin=0.30";
-    const blob = exportarPdfComRetryGE_([
-        base + "&r1=0&c1=0&r2=70&c2=15", // 1ª opção: só o bloco usado da aba
-        base                              // fallback: aba inteira
-    ]).setName("Audiencia_GE_" +
-        Utilities.formatDate(new Date(), CFG.TIMEZONE, "yyyy-MM-dd") + ".pdf");
+    // --- Export para PDF (paisagem, 1 página) via planilha TEMPORÁRIA ---
+    // Exportar direto da Radar falhava com HTTP 500: o endpoint de export
+    // renderiza o documento inteiro (Histórico gigante + centenas de
+    // fórmulas). Copiamos só a aba PDF para um arquivo mínimo, exportamos
+    // dele e jogamos o temporário no lixo.
+    const temp = SpreadsheetApp.create("tmp_pdf_ge_" +
+        Utilities.formatDate(new Date(), CFG.TIMEZONE, "yyyyMMdd_HHmmss"));
+    let blob;
+    try {
+        const copia = pdfSheet.copyTo(temp).setName("PDF");
+        temp.deleteSheet(temp.getSheets()[0]); // remove a "Página1" vazia
+        SpreadsheetApp.flush();
+        Utilities.sleep(800); // deixa o gráfico copiado assentar
+
+        const base = "https://docs.google.com/spreadsheets/d/" + temp.getId() + "/export" +
+            "?format=pdf&gid=" + copia.getSheetId() +
+            "&size=A4&portrait=false&scale=4" +
+            "&gridlines=false&printtitle=false&sheetnames=false&pagenum=false" +
+            "&top_margin=0.30&bottom_margin=0.30&left_margin=0.30&right_margin=0.30";
+        blob = exportarPdfComRetryGE_([
+            base + "&r1=0&c1=0&r2=70&c2=15", // só o bloco usado (R/S ficam fora)
+            base                              // fallback: aba inteira
+        ]).setName("Audiencia_GE_" +
+            Utilities.formatDate(new Date(), CFG.TIMEZONE, "yyyy-MM-dd") + ".pdf");
+    } finally {
+        try { DriveApp.getFileById(temp.getId()).setTrashed(true); } catch (eTrash) { }
+    }
 
     // Salva na mesma pasta da planilha (ou raiz)
     let arquivo;

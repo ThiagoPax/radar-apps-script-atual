@@ -27,9 +27,9 @@ var GE32_END_HOUR = 18;
 var GE32_END_MINUTE = 59;
 
 // Pequena espera para garantir que a planilha e a TY terminem de recalcular antes do painel ler os dados.
-// 500ms basta após o flush(); o valor antigo (1800) deixava o tick com ~4s e
-// serializava o webhook de audiência (timeout no agente OCR local).
-var GE32_SLEEP_AFTER_TY_MS = 500;
+// 300ms basta após o flush(); valores altos deixavam o tick lento e
+// serializavam o webhook de audiência (timeout no agente OCR local).
+var GE32_SLEEP_AFTER_TY_MS = 300;
 
 // -----------------------------------------------------------------------------
 // INSTALAÇÃO
@@ -135,7 +135,9 @@ function ge32_atualizarTYPainelAgora_(fonte) {
   // travar a digitação do usuário.
   var obteveLock;
   if (fonte === "hoje_sync") {
-    try { lock.waitLock(15000); obteveLock = true; } catch (eLock) { obteveLock = false; }
+    // Espera moderada: 5s cobre um doPost/onEdit em andamento sem empilhar
+    // ticks quando algo trava (o guarda de overlap do tick faz o resto).
+    try { lock.waitLock(5000); obteveLock = true; } catch (eLock) { obteveLock = false; }
   } else {
     obteveLock = lock.tryLock(2500);
   }

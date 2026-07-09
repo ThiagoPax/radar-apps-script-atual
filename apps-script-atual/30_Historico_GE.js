@@ -35,8 +35,11 @@ function parseDateStr_(s) {
 function getAudColsGE_(sheet) {
     var lastCol = sheet.getLastColumn();
     var audCols = [];
+    // Uma leitura em bloco do header inteiro — o loop antigo fazia um getValue
+    // por coluna (~130 idas à planilha por chamada, várias vezes por minuto).
+    var header = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
     for (var c = 4; c <= lastCol; c += 4) {
-        var h = sheet.getRange(1, c).getValue();
+        var h = header[c - 1];
         var hasDate = (h instanceof Date) ||
             (typeof h === "string" && /^\d{2}\/\d{2}\/\d{4}$/.test(h.trim()));
         if (hasDate) audCols.push(c);

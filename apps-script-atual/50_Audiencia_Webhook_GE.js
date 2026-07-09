@@ -321,34 +321,34 @@ function gravarAudienciasGEBatchFast_(payload) {
     }
   });
 
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(AUD_GE_CFG.SHEET_NAME);
-
-  if (!sheet) {
-    return {
-      success: false,
-      ok: false,
-      error: "Aba não encontrada: " + AUD_GE_CFG.SHEET_NAME
-    };
-  }
-
+  // ENFILEIRA em vez de gravar: o doPost precisa responder em ~1s para não
+  // estourar o timeout do robô OCR (o export/tick pode segurar a planilha por
+  // vários segundos). setProperty é atômico por chave; chave determinística
+  // por linha faz FINAL sobrescrever REVISAO/PREVIA naturalmente.
+  var props = PropertiesService.getScriptProperties();
+  var ok = [];
   var rows = Object.keys(byRow).sort(function(a, b) {
     return Number(a) - Number(b);
   });
 
-  var ok = [];
   for (var r = 0; r < rows.length; r++) {
     var chosen = byRow[rows[r]];
-    var cell = sheet.getRange(chosen.row, AUD_GE_CFG.AUD_COL);
+    var chave = OCR_QUEUE_PREFIX + chosen.row;
 
-    // Modo mais rápido: só grava valor e formato.
-    cell.setValue(chosen.value);
-    cell.setNumberFormat("0.00");
-
-    // Comentário desativado por padrão para não atrasar o ao vivo.
-    if (AUD_GE_CFG.WRITE_NOTE_DURING_LIVE) {
-      cell.setNote(montarNotaRapidaGE_(chosen));
+    var existente = null;
+    try { existente = JSON.parse(props.getProperty(chave) || "null"); } catch (eJ) {}
+    if (existente && existente.priority > chosen.stage.priority) {
+      continue; // já há leitura de estágio superior aguardando para esta linha
     }
+
+    props.setProperty(chave, JSON.stringify({
+      row: chosen.row,
+      value: chosen.value,
+      stage: chosen.stage.label,
+      priority: chosen.stage.priority,
+      horario: chosen.horario,
+      capturedAt: chosen.capturedAt
+    }));
 
     ok.push({
       horario: chosen.horario,
@@ -359,26 +359,104 @@ function gravarAudienciasGEBatchFast_(payload) {
     });
   }
 
-  var elapsedMs = new Date().getTime() - startedAt.getTime();
-
-  // Sinaliza ao tick de 1 min que há OCR recém-gravado em D aguardando
-  // consolidação (setValue não dispara onEdit). Cache é barato e não atrasa o doPost.
+  // Tentativa oportunista: se ninguém (tick/onEdit) está mexendo na planilha,
+  // drena a fila agora e o número aparece em D em ~2s. Se o lock estiver
+  // ocupado, o tick drena em até ~30s.
+  var drenado = false;
   try {
-    CacheService.getScriptCache().put("ocr_pendente", String(ok.length), 300);
-  } catch (eCache) {}
+    var lock = LockService.getScriptLock();
+    if (lock.tryLock(300)) {
+      try {
+        drenarFilaOcrGE_();
+        drenado = true;
+      } finally {
+        lock.releaseLock();
+      }
+    }
+  } catch (eDrain) {}
+
+  var elapsedMs = new Date().getTime() - startedAt.getTime();
 
   return {
     success: true,
     ok: true,
-    mode: "batch_v41_fast",
+    mode: "batch_v42_queue",
     total: readings.length,
     valid_count: normalized.length,
     ok_count: ok.length,
     error_count: errors.length,
+    drained: drenado,
     elapsed_ms: elapsedMs,
     results: ok,
     errors: errors
   };
+}
+
+// =============================================================================
+// FILA OCR (ScriptProperties) — gravação real na coluna D
+// =============================================================================
+
+var OCR_QUEUE_PREFIX = "ocr_q_";
+var OCR_DONE_PREFIX = "ocr_done_";
+
+// Grava na coluna D tudo que está na fila. Nunca rebaixa: se uma linha já
+// recebeu FINAL, uma PREVIA atrasada para a mesma linha é descartada.
+function drenarFilaOcrGE_() {
+  var props = PropertiesService.getScriptProperties();
+  var keys;
+  try { keys = props.getKeys(); } catch (e) { return 0; }
+  var fila = [];
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i].indexOf(OCR_QUEUE_PREFIX) !== 0) continue;
+    try {
+      var item = JSON.parse(props.getProperty(keys[i]) || "null");
+      if (item && typeof item.row === "number" && typeof item.value === "number") {
+        item._key = keys[i];
+        fila.push(item);
+      } else {
+        props.deleteProperty(keys[i]);
+      }
+    } catch (eItem) {
+      props.deleteProperty(keys[i]);
+    }
+  }
+  if (!fila.length) return 0;
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(AUD_GE_CFG.SHEET_NAME);
+  if (!sheet) return 0;
+
+  var gravadas = 0;
+  for (var f = 0; f < fila.length; f++) {
+    var it = fila[f];
+    var feito = Number(props.getProperty(OCR_DONE_PREFIX + it.row) || 0);
+    if (feito > it.priority) {
+      props.deleteProperty(it._key);
+      continue;
+    }
+    var cell = sheet.getRange(it.row, AUD_GE_CFG.AUD_COL);
+    cell.setValue(it.value);
+    cell.setNumberFormat("0.00");
+    props.setProperty(OCR_DONE_PREFIX + it.row, String(it.priority));
+    props.deleteProperty(it._key);
+    gravadas++;
+  }
+  if (gravadas) {
+    try { logGE_("OCR", "Fila drenada: " + gravadas + " leituras gravadas em D."); } catch (eLog) {}
+  }
+  return gravadas;
+}
+
+// Limpa fila e marcadores do dia anterior (chamar na rotina da manhã / preparar grade).
+function limparFilaOcrGE_() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var keys = props.getKeys();
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf(OCR_QUEUE_PREFIX) === 0 || keys[i].indexOf(OCR_DONE_PREFIX) === 0) {
+        props.deleteProperty(keys[i]);
+      }
+    }
+  } catch (e) {}
 }
 
 function montarNotaRapidaGE_(item) {

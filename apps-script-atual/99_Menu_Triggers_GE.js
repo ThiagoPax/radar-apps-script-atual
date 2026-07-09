@@ -194,8 +194,14 @@ function geOnEditInstalavelGE(e) {
         const col = e.range.getColumn();
 
         if (nome === CFG.SHEET_HOJE) {
-            // OCR (D), manual (E), tema (I) ou subtema (J) nos minutos
-            if (row >= 3 && row <= 62 && [4, 5, 9, 10].indexOf(col) >= 0) {
+            // OCR (D) ou manual (E): fast-path — só a linha editada, resposta ~2s.
+            // O recompute completo (C, M–R, Histórico) fica com o tick de 1 min.
+            if (row >= 3 && row <= 62 && (col === 4 || col === 5)) {
+                try { atualizarLinhaHojeRapidaGE_(row); } catch (err) { }
+                return;
+            }
+            // Tema (I) ou subtema (J): precisa do motor completo (throttled)
+            if (row >= 3 && row <= 62 && (col === 9 || col === 10)) {
                 if (throttleGE_("hoje_edit", 4)) atualizarHojeGE();
             }
             return;
@@ -250,6 +256,13 @@ function rotinaManhaGE() {
         passos.push(r.ok ? "novo dia criado" : "dia já existia");
     } catch (e) { passos.push("novo dia⚠️" + e.message); }
     try { prepararHojeGE(); passos.push("Hoje preparada"); } catch (e) { passos.push("Hoje⚠️" + e.message); }
+    try { if (typeof limparFilaOcrGE_ === "function") limparFilaOcrGE_(); passos.push("fila OCR limpa"); } catch (e) { }
+    try {
+        if (typeof precomputarFatoresTemaPV2GE === "function") {
+            precomputarFatoresTemaPV2GE();
+            passos.push("fatores PV2 cacheados");
+        }
+    } catch (e) { passos.push("fatores PV2⚠️" + e.message); }
     logGE_("ROTINA_06H", passos.join(" | "));
 }
 
@@ -262,15 +275,27 @@ function geTickAoVivoGE() {
     if (minutos < 17 * 60 + 58 || minutos > 19 * 60 + 5) return;
     const dia = agora.getDay();
     if (dia === 0 || dia === 6) return;
+
+    // Guarda de overlap: se o tick anterior ainda roda, pula este (o próximo
+    // vem em 60s). Evita a pilha de execuções disputando o mesmo lock.
+    let cache = null;
     try {
-        const cache = CacheService.getScriptCache();
-        const pend = cache.get("ocr_pendente");
-        if (pend) {
-            logGE_("TICK", "Consolidando OCR pendente do webhook (" + pend + " leituras).");
-            cache.remove("ocr_pendente");
+        cache = CacheService.getScriptCache();
+        if (cache.get("tick_running")) {
+            logGE_("TICK", "Pulado: tick anterior ainda em execução.");
+            return;
         }
-    } catch (e) { }
-    try { atualizarHojeGE(); } catch (e) { logGE_("TICK", "⚠️ " + e.message); }
+        cache.put("tick_running", "1", 90);
+    } catch (e) { cache = null; }
+
+    try {
+        // Drena a fila OCR no início e no fim → gravação efetiva a cada ~30s.
+        try { if (typeof drenarFilaOcrGE_ === "function") drenarFilaOcrGE_(); } catch (e) { }
+        try { atualizarHojeGE(); } catch (e) { logGE_("TICK", "⚠️ " + e.message); }
+        try { if (typeof drenarFilaOcrGE_ === "function") drenarFilaOcrGE_(); } catch (e) { }
+    } finally {
+        try { if (cache) cache.remove("tick_running"); } catch (e) { }
+    }
 }
 
 // Tentativas de importação da transcrição (19:00 / 19:05 / 19:10)
@@ -351,7 +376,10 @@ function instalarTriggersGE() {
         ["geImportacaoGE", CFG.IMPORT_TENTATIVAS[1].hour, CFG.IMPORT_TENTATIVAS[1].minute],
         ["geImportacaoGE", CFG.IMPORT_TENTATIVAS[2].hour, CFG.IMPORT_TENTATIVAS[2].minute],
         ["geAlertaTranscricaoGE", CFG.IMPORT_ALERTA_HOUR, CFG.IMPORT_ALERTA_MINUTE],
-        ["geEmailDashboardTriggerGE", CFG.EMAIL_DASHBOARD_HOUR, CFG.EMAIL_DASHBOARD_MINUTE]
+        ["geEmailDashboardTriggerGE", CFG.EMAIL_DASHBOARD_HOUR, CFG.EMAIL_DASHBOARD_MINUTE],
+        // Aquece o cache de fatores PV2 antes do ao vivo (o CacheService expira
+        // em 6h, então o aquecimento das 06:00 não chega vivo às 18:00).
+        ["precomputarFatoresTemaPV2GE", 17, 40]
     ];
     // Um trigger diário por rotina (limite de 20 triggers por script);
     // os handlers ignoram sábado/domingo internamente.

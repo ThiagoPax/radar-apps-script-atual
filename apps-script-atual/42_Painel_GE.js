@@ -39,6 +39,43 @@ function painel31_getPainelSheet_GE_(ss) {
   return sh;
 }
 
+// Mapa tema → fator de desempenho RECENTE, da aba Tema Minuto:
+// média dos últimos 3 dias (fallback 5, fallback todos) ÷ média geral
+// ponderada, com amostra mínima de 30 min e clamp 0,85–1,15.
+function painel31_fatoresTemaRecentes_GE_(ss) {
+  var out = {};
+  try {
+    var nomeAba = (typeof CFG !== 'undefined' && CFG.GE_OUT_MEDIA_TEMA) ? CFG.GE_OUT_MEDIA_TEMA : 'Tema Minuto';
+    var sh = ss.getSheetByName(nomeAba);
+    if (!sh || sh.getLastRow() < 2) return out;
+    var dados = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+
+    var somaGeral = 0, pesoGeral = 0;
+    for (var i = 0; i < dados.length; i++) {
+      var mAll = Number(dados[i][2]), mins = Number(dados[i][1]) || 0;
+      if (isFinite(mAll) && mAll > 0 && mins >= 30) {
+        somaGeral += mAll * mins;
+        pesoGeral += mins;
+      }
+    }
+    var mediaGeral = pesoGeral > 0 ? somaGeral / pesoGeral : 0;
+    if (!mediaGeral) return out;
+
+    for (var j = 0; j < dados.length; j++) {
+      var nome = String(dados[j][0] || '').trim().toUpperCase();
+      var n = Number(dados[j][1]) || 0;
+      if (!nome || n < 30) continue;
+      var u3 = Number(dados[j][4]), u5 = Number(dados[j][3]), todos = Number(dados[j][2]);
+      var mediaRec = (isFinite(u3) && u3 > 0) ? u3 :
+        (isFinite(u5) && u5 > 0) ? u5 :
+        (isFinite(todos) && todos > 0) ? todos : 0;
+      if (!mediaRec) continue;
+      out[nome] = painel31_clamp_GE_(mediaRec / mediaGeral, 0.85, 1.15);
+    }
+  } catch (e) { }
+  return out;
+}
+
 function painel31_reconstruir_TDTV_GE() {
   var ss = painel31_getSpreadsheet_GE_();
   var sh = ss.getSheetByName('Histórico');
@@ -107,6 +144,7 @@ function painel31_reconstruir_TDTV_GE() {
   }
 
   var finalPrev = painel31_mediaFinalPrevista_GE_(D, TY, lastReal);
+  var fatoresTemaRecentes = painel31_fatoresTemaRecentes_GE_(ss);
 
   var headers1 = [[
     'BASE HIST.', 'DIA/HIST', 'FATOR DIA', 'RECENTE', 'INCLINACAO', 'RUPTURA', 'FATOR FINAL',
@@ -134,14 +172,17 @@ function painel31_reconstruir_TDTV_GE() {
     var ruptura = painel31_ruptura_GE_(inclinacao);
     var fatorFinal = painel31_clamp_GE_(0.55 * fatorDiaGlobal + 0.35 * recente + 0.10 * (1 + inclinacao), 0.55, 1.55);
 
-    var fatorTema = 1;
-    if (painel31_isNumero_GE_(UD[m]) && painel31_isNumero_GE_(TY[m]) && TY[m] > 0) {
-      fatorTema = painel31_clamp_GE_(UD[m] / TY[m], 0.85, 1.15);
-    } else if (painel31_isNumero_GE_(UD[m]) && base > 0) {
-      fatorTema = painel31_clamp_GE_(UD[m] / base, 0.85, 1.15);
-    }
-
+    // FATOR TEMA de verdade: índice recente do tema que está no ar (aba Tema
+    // Minuto, últimos dias, amostra mínima). O cálculo antigo era
+    // clamp(PROJ_legado/PROJ_V2) — uma razão entre projeções que ficava
+    // cronicamente ≤0,96 e travava SINAL em "TEMA PESA", AÇÃO em "Encurtar
+    // tema ou trocar" e RISCO em ALTO, independentemente do tema.
     var temaAtual = F[m];
+    var fatorTema = 1;
+    var chaveTema = String(temaAtual || '').trim().toUpperCase();
+    if (fatoresTemaRecentes.hasOwnProperty(chaveTema)) {
+      fatorTema = fatoresTemaRecentes[chaveTema];
+    }
     if (m === 0 || temaAtual !== temaAnterior) {
       blocoDur = 1;
     } else {

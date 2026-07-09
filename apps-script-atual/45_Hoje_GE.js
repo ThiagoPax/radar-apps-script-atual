@@ -350,7 +350,15 @@ function atualizarHojeGE() {
     calcularEspelhoHojeGE_(sh);
     atualizarTituloHojeGE_(sh, hist);
     preencherMediaHistoricaHojeGE_(sh);
-    try { preencherSombraHojeGE_(sh); } catch (e) { logGE_("HOJE", "Sombra V3: " + e.message); }
+    // Sombra V3 é curva histórica (quase estática durante o show) e relê a
+    // Base inteira — roda no máximo a cada 5 min para não pesar o tick.
+    try {
+        const cacheV3 = CacheService.getScriptCache();
+        if (!cacheV3.get("sombra_v3_ok")) {
+            preencherSombraHojeGE_(sh);
+            cacheV3.put("sombra_v3_ok", "1", 300);
+        }
+    } catch (e) { logGE_("HOJE", "Sombra V3: " + e.message); }
     atualizarMediasLinha63HojeGE_(sh);
     garantirGraficoSeNecessarioHojeGE_(sh);
 }
@@ -448,6 +456,70 @@ function atualizarTituloHojeGE_(sh, hist) {
 // -----------------------------------------------------------------------------
 // Decisão editorial por minuto (K–R) a partir do painel TD-TV + contexto
 // -----------------------------------------------------------------------------
+// Fast-path do onEdit: consolida F/G/H e calcula K/L SÓ da linha editada
+// (~4 idas à planilha, ~2s). Digitar em E dava a volta pela cadeia completa
+// (~30s+ sob contenção) — o recompute completo continua no tick de 1 min.
+function atualizarLinhaHojeRapidaGE_(row) {
+    const ss = SpreadsheetApp.getActive();
+    const sh = ss.getSheetByName(CFG.SHEET_HOJE);
+    const hist = ss.getSheetByName(CFG.GE_OUT_HISTORICO);
+    if (!sh || !hist || row < 3 || row > 62) return;
+
+    const linha = sh.getRange(row, 2, 1, 4).getValues()[0]; // B..E
+    const b = numOuNullGE_(linha[0]);
+    const prev = numOuNullGE_(linha[1]);
+    const ocr = numOuNullGE_(linha[2]);
+    const manual = numOuNullGE_(linha[3]);
+
+    // Último FINAL anterior (para validar salto do OCR)
+    let ultimoFinal = null;
+    if (row > 3) {
+        const fAnt = sh.getRange(3, HOJE_GE.COL.FINAL, row - 3, 1).getValues();
+        for (let i = fAnt.length - 1; i >= 0; i--) {
+            if (typeof fAnt[i][0] === "number") { ultimoFinal = fAnt[i][0]; break; }
+        }
+    }
+
+    let ocrValido = ocr !== null && ocr >= HOJE_GE.OCR_MIN && ocr <= HOJE_GE.OCR_MAX;
+    if (ocrValido && ultimoFinal !== null && ultimoFinal > 0) {
+        const razao = ocr / ultimoFinal;
+        if (razao > HOJE_GE.OCR_SALTO_MAX || razao < 1 / HOJE_GE.OCR_SALTO_MAX) ocrValido = false;
+    }
+
+    let final = null, origem = "", status = "";
+    if (manual !== null) {
+        final = manual; origem = "MANUAL";
+        status = (ocr !== null && Math.abs(ocr - manual) > 0.005) ? "MANUAL (≠ OCR)" : "OK";
+    } else if (ocr !== null) {
+        if (ocrValido) { final = ocr; origem = "OCR"; status = "OCR PRÉVIA"; }
+        else status = "OCR SUSPEITO (ignorado)";
+    }
+
+    sh.getRange(row, HOJE_GE.COL.FINAL, 1, 3)
+        .setValues([[final === null ? "" : final, origem, status]]);
+
+    // K desvio / L leitura — mesma regra do bloco de decisão completo
+    const limiarRuptura = Number(getConfigValueGE_("LIMIAR_RUPTURA", 0.20)) || 0.20;
+    const ref = final !== null ? final : prev;
+    let desvio = "", leitura = "";
+    if (b && ref !== null) {
+        desvio = ref / b - 1;
+        if (desvio >= limiarRuptura) leitura = "RUPTURA POSITIVA";
+        else if (desvio <= -limiarRuptura) leitura = "RUPTURA NEGATIVA";
+        else if (desvio > 0.07) leitura = "ACIMA DO CONTEXTO";
+        else if (desvio < -0.07) leitura = "ABAIXO DO CONTEXTO";
+        else leitura = "DENTRO DO CONTEXTO";
+    }
+    sh.getRange(row, HOJE_GE.COL.DESVIO, 1, 2).setValues([[desvio,
+        final !== null ? leitura : (leitura ? leitura + " (prev.)" : "")]]);
+
+    // Empurra o real para o Histórico (D da linha) preservando reais iguais
+    if (final !== null) {
+        const hCell = hist.getRange(row, 4);
+        if (hCell.getFormula() || hCell.getValue() !== final) hCell.setValue(final);
+    }
+}
+
 function atualizarDecisaoEditorialHojeGE_(sh, hist) {
     const n = HOJE_GE.N_MIN;
     const limiarRuptura = Number(getConfigValueGE_("LIMIAR_RUPTURA", 0.20)) || 0.20;
@@ -550,18 +622,44 @@ function sustentarTemaGE_(sinal, ruptura, durBloco, minutoIdx, breaksGlobo) {
     return "Manter e observar.";
 }
 
-// Próximo tema: índice da aba Tema Minuto + contexto dos clubes + não repetir
-// temas recém-usados.
-// Score multi-sinal (Fase 3): índice histórico do tema × fator clube APRENDIDO
-// (48, incremental do resultado/recência) × fator faixa (rendimento no terço
-// do programa) × frescor (penaliza saturação) × contexto ativo. Retorna o
-// top-3 EXPLICADO. `minutoAlvo` define a faixa (abertura/miolo/fecho) da vaga.
+// Índice de desempenho por tema HOJE, dentro do programa: média de
+// (AUD FINAL / média contextual) por tema, exigindo ≥3 minutos reais.
+// Mesma matemática do "Tema mais forte" do PDF (montarLeituraPDFGE_).
+function indiceHojePorTemaGE_(sh) {
+    const out = {};
+    try {
+        const finais = sh.getRange(3, HOJE_GE.COL.FINAL, HOJE_GE.N_MIN, 1).getValues();
+        const bases = sh.getRange(3, HOJE_GE.COL.MEDIA_CTX, HOJE_GE.N_MIN, 1).getValues();
+        const temas = sh.getRange(3, HOJE_GE.COL.TEMA, HOJE_GE.N_MIN, 1).getValues();
+        const acc = {};
+        for (let i = 0; i < HOJE_GE.N_MIN; i++) {
+            const v = finais[i][0], b = bases[i][0];
+            const t = String(temas[i][0] || "").trim().toUpperCase();
+            if (!t || t.indexOf("MERCHAN") >= 0) continue;
+            if (typeof v !== "number" || typeof b !== "number" || b <= 0) continue;
+            if (!acc[t]) acc[t] = { soma: 0, n: 0 };
+            acc[t].soma += v / b;
+            acc[t].n++;
+        }
+        for (const t in acc) {
+            if (acc[t].n >= 3) out[t] = acc[t].soma / acc[t].n;
+        }
+    } catch (e) { }
+    return out;
+}
+
+// Próximo tema: desempenho RECENTE comprovado (média dos últimos 3/5 dias
+// fechados da aba Tema Minuto, com amostra mínima — amostra baixa é
+// DESCARTADA, não rotulada) × desempenho de HOJE no próprio programa
+// (tema que já provou ser bom no ar sobe; fraco hoje desce) × fator clube
+// aprendido × fator faixa × frescor × contexto. Top-3 explicado.
 function proximoTemaSugeridoGE_(sh, minutoAlvo) {
     try {
         const ss = SpreadsheetApp.getActive();
         const tema = ss.getSheetByName(CFG.GE_OUT_MEDIA_TEMA);
         if (!tema || tema.getLastRow() < 2) return "";
         const alvo = typeof minutoAlvo === "number" ? minutoAlvo : 30;
+        const MIN_AMOSTRA = 30; // minutos históricos mínimos para entrar no ranking
 
         const dados = tema.getRange(2, 1, tema.getLastRow() - 1, 6).getValues();
         const usadosArr = sh.getRange(3, HOJE_GE.COL.TEMA, HOJE_GE.N_MIN, 1).getValues()
@@ -571,21 +669,52 @@ function proximoTemaSugeridoGE_(sh, minutoAlvo) {
         const gastosHoje = {};
         for (const t of usadosArr) if (t) gastosHoje[t] = (gastosHoje[t] || 0) + 1;
 
+        const idxHoje = indiceHojePorTemaGE_(sh);
         const clubes = getContextoClubesHojeGE_();
         const fatClube = (typeof fatoresClubesHojeGE_ === "function") ? fatoresClubesHojeGE_() : {};
         const contexto = String(getConfigValueGE_("CONTEXTO_ATIVO", "NORMAL")).toUpperCase();
 
+        // Média geral ponderada dos temas elegíveis (referência do índice recente)
+        let somaGeral = 0, pesoGeral = 0;
+        for (const row of dados) {
+            const mAll = Number(row[2]), mins = Number(row[1]) || 0;
+            if (isFinite(mAll) && mAll > 0 && mins >= MIN_AMOSTRA) {
+                somaGeral += mAll * mins;
+                pesoGeral += mins;
+            }
+        }
+        const mediaGeral = pesoGeral > 0 ? somaGeral / pesoGeral : 0;
+
         const candidatos = [];
         for (const row of dados) {
             const nome = String(row[0] || "").trim().toUpperCase();
-            const indice = Number(row[5]);
             const minutos = Number(row[1]) || 0;
-            if (!nome || nome.indexOf("MERCHAN") >= 0 || !isFinite(indice) || indice <= 0) continue;
+            const mediaTodos = Number(row[2]);
+            const mediaUlt5 = Number(row[3]);
+            const mediaUlt3 = Number(row[4]);
+            if (!nome || nome.indexOf("MERCHAN") >= 0) continue;
+            if (minutos < MIN_AMOSTRA) continue; // amostra baixa fora do ranking
             if (recentes.indexOf(nome) >= 0) continue;
+
+            // Desempenho recente: últimos 3 dias; sem dado, últimos 5; sem, todos.
+            const mediaRecente =
+                (isFinite(mediaUlt3) && mediaUlt3 > 0) ? mediaUlt3 :
+                (isFinite(mediaUlt5) && mediaUlt5 > 0) ? mediaUlt5 :
+                (isFinite(mediaTodos) && mediaTodos > 0) ? mediaTodos : 0;
+            if (!mediaRecente || !mediaGeral) continue;
+            const indice = mediaRecente / mediaGeral;
+            if (!isFinite(indice) || indice <= 0) continue;
 
             const porques = [];
             let score = indice;
-            if (minutos < 30) score *= 0.9;
+            if (indice >= 1.05) porques.push("últ. dias +" + ((indice - 1) * 100).toFixed(0) + "%");
+
+            // Desempenho de HOJE no programa: comprovadamente bom sobe, fraco desce.
+            const hoje = idxHoje[nome];
+            if (typeof hoje === "number") {
+                if (hoje >= 1.05) { score *= 1.2; porques.push("forte hoje +" + ((hoje - 1) * 100).toFixed(0) + "%"); }
+                else if (hoje <= 0.9) { score *= 0.8; porques.push("fraco hoje " + ((hoje - 1) * 100).toFixed(0) + "%"); }
+            }
             // fator clube APRENDIDO (48) — substitui os boosts fixos
             const fc = fatClube[nome];
             if (typeof fc === "number" && Math.abs(fc - 1) > 0.005) {
@@ -617,7 +746,6 @@ function proximoTemaSugeridoGE_(sh, minutoAlvo) {
         // top-3 explicado
         return candidatos.slice(0, 3).map((c, i) => {
             let t = (i + 1) + ". " + formatTemaDisplay_(c.nome);
-            if (c.minutos < 30) t += " (amostra baixa)";
             if (c.porques.length) t += " — " + c.porques.join(", ");
             return t;
         }).join("  ·  ");

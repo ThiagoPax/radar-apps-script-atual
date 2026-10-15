@@ -52,4 +52,22 @@ for (const date of ['14-10-2026','31/02/2026','15/10/2026','16/10/2026']) {
  ctx.normalizeText_=x=>x.toLowerCase();vm.runInContext(fs.readFileSync(path.join(__dirname, '../apps-script-atual/10_Input_GE.js'),'utf8'),ctx);
  assert.equal(JSON.stringify(ctx.montarInputSpeechHistoricoGE_({lines})),JSON.stringify(ctx.loadGEInputFromSheet_()));
 }
-console.log('Recovery checks passed: exact write scope, audience/formulas, idempotence, date/source/timeline validation, live parser equivalence.');
+// A busca só abre os XLSX da data pedida, incluindo duplicatas com sufixo.
+{
+ const opened=[];
+ const names=['transcricao261013.xlsx','transcricao261013_2.xlsx','transcricao261014.xlsx','transcricao261014_2.xlsx'];
+ const files=names.map((name,i)=>({getName:()=>name,getMimeType:()=> 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',getDateCreated:()=>new Date('2026-10-15T12:00:00Z'),getLastUpdated:()=>new Date(1792065600000+i*1000),getId:()=>String(i),getBlob:()=>{opened.push(name);return name;}}));
+ let index=0;
+ const sandbox={Date,CFG:{TIMEZONE:'America/Sao_Paulo',SPEECH_DRIVE_FOLDER_ID:'folder'},Logger:{log:()=>{}},Utilities:{formatDate:key},PropertiesService:{getScriptProperties:()=>({getProperty:()=>null})},DriveApp:{getFolderById:()=>({getFiles:()=>({hasNext:()=>index<files.length,next:()=>files[index++]})})}};
+ vm.createContext(sandbox);vm.runInContext(script,sandbox);
+ sandbox.parseSpeechXlsxBlob_=()=>({youtubeTitle:'Programa',lines:[{timestamp:'00:01',text:'jogo'}]});
+ const chosen=sandbox.buscarArquivoSpeechDoDiaNoDrive_({expectedDate:new Date('2026-10-14T12:00:00Z')});
+ assert.deepEqual(opened,['transcricao261014.xlsx','transcricao261014_2.xlsx']);
+ assert.equal(chosen.fileName,'transcricao261014_2.xlsx');assert.equal(key(chosen.programDate),'2026-10-14');
+ const otherFormat=sandbox.extrairDatasCandidatasDoNomeArquivoSpeech_('transcricao141026.xlsx');
+ assert.ok(otherFormat.some(d=>key(d)==='2026-10-14'));
+ const invalid=sandbox.extrairDatasCandidatasDoNomeArquivoSpeech_('transcricao310226.xlsx');
+ assert.ok(!invalid.some(d=>key(d)==='2026-03-03'));
+}
+console.log('Recovery checks passed: write scope, audience/formulas, idempotence, validation, parser equivalence, date filtering and numbered duplicates.');
+

@@ -334,7 +334,7 @@ function buscarArquivoSpeechDoDiaNoDrive_(options) {
     const opts = options || {};
     const folderId = PropertiesService.getScriptProperties().getProperty("SPEECH_DRIVE_FOLDER_ID") || CFG.SPEECH_DRIVE_FOLDER_ID;
     if (!folderId) throw Error("SPEECH_DRIVE_FOLDER_ID não configurado.");
-    const candidates = listarArquivosSpeechCandidatosNoDrive_(folderId);
+    const candidates = listarArquivosSpeechCandidatosNoDrive_(folderId, { expectedDate: opts.expectedDate || new Date() });
     const chosen = escolherMelhorArquivoSpeechNoDrive_(candidates, opts);
     if (!chosen) return null;
     Logger.log("[Speech] Arquivo escolhido: " + chosen.fileName + " | motivo: " + chosen.selectionReason);
@@ -350,20 +350,28 @@ function buscarArquivoSpeechDoDiaNoDrive_(options) {
     });
 }
 
-function listarArquivosSpeechCandidatosNoDrive_(folderId) {
+function listarArquivosSpeechCandidatosNoDrive_(folderId, options) {
     const folder = DriveApp.getFolderById(folderId);
     const files = folder.getFiles();
     const candidates = [];
+    const expectedKey = options && options.expectedDate ? formatDateKey_(normalizeDateOnly_(options.expectedDate)) : "";
+    let ignoredByDate = 0;
     while (files.hasNext()) {
         const file = files.next();
         const name = file.getName() || "";
+        if (!isNomeArquivoSpeechAceito_(name)) continue;
+        let dateCandidates = extrairDatasCandidatasDoNomeArquivoSpeech_(name);
+        // Filtra pelos metadados antes de baixar/descompactar cada XLSX antigo.
+        if (expectedKey && dateCandidates.length && !dateCandidates.some(date => formatDateKey_(date) === expectedKey)) {
+            ignoredByDate++;
+            continue;
+        }
         const mimeType = file.getMimeType() || "";
         const createdAt = getFileCreatedAtSafe_(file);
         const updatedAt = file.getLastUpdated();
         const nameAccepted = isNomeArquivoSpeechAceito_(name);
         let parsed = null;
         let programDate = null;
-        let dateCandidates = [];
         let accepted = !1;
         let reason = "";
         Logger.log("[Speech] Encontrado no Drive | nome: " + name + " | mimeType: " + mimeType + " | criado: " + formatLogDate_(createdAt) + " | modificado: " + formatLogDate_(updatedAt));
@@ -377,7 +385,6 @@ function listarArquivosSpeechCandidatosNoDrive_(folderId) {
             if (!parsed.lines || parsed.lines.length === 0) {
                 reason = "xlsx_sem_linhas";
             } else {
-                dateCandidates = extrairDatasCandidatasDoNomeArquivoSpeech_(name);
                 programDate = (dateCandidates.length ? dateCandidates[0] : null) ||
                     extrairDataProgramaSpeech_(parsed.youtubeTitle, name, updatedAt);
                 if (!dateCandidates.length && programDate) dateCandidates = [programDate];
@@ -400,6 +407,7 @@ function listarArquivosSpeechCandidatosNoDrive_(folderId) {
             dateCandidates: dateCandidates
         });
     }
+    if (ignoredByDate) Logger.log("[Speech] " + ignoredByDate + " arquivos de outras datas ignorados sem abrir o XLSX.");
     return candidates;
 }
 
@@ -464,7 +472,7 @@ function extrairDataDoNomeArquivoSpeech_(fileName) {
 // qual delas bate com a data esperada do programa.
 function extrairDatasCandidatasDoNomeArquivoSpeech_(fileName) {
     const name = (fileName || "").toString();
-    const match = name.match(/^transcricao(?:[_-]?)(\d{6})\.xlsx$/i);
+    const match = name.match(/^transcricao(?:[_-]?)(\d{6})(?:_\d+)?\.xlsx$/i);
     if (!match) return [];
     const digits = match[1];
     const combos = [
@@ -484,6 +492,7 @@ function extrairDatasCandidatasDoNomeArquivoSpeech_(fileName) {
     combos.forEach(c => {
         if (c.day < 1 || c.day > 31 || c.month < 1 || c.month > 12) return;
         const dt = new Date(c.year, c.month - 1, c.day);
+        if (dt.getFullYear() !== c.year || dt.getMonth() !== c.month - 1 || dt.getDate() !== c.day) return;
         if (!vistos[dt.getTime()]) {
             vistos[dt.getTime()] = true;
             datas.push(dt);

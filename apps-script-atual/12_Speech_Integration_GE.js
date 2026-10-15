@@ -58,7 +58,7 @@ function processarSpeechDoDia_() {
  * never email an old day's editorial report.
  */
 function reprocessarSpeechPorDataGE_(dateText) {
-    const match = String(dateText || "").trim().match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+    const match = String(dateText || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
     if (!match) throw Error("Informe a data no formato DD/MM/AAAA.");
     const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);
     const target = new Date(year, month - 1, day);
@@ -100,7 +100,7 @@ function reprocessarSpeechPorDataGE_(dateText) {
             const time = row[0] instanceof Date
                 ? Utilities.formatDate(row[0], CFG.TIMEZONE, "HH:mm")
                 : String(row[0] || "").trim();
-            const found = time.match(/(18:\\d{2})/);
+            const found = time.match(/(18:\d{2})/);
             if (found) minuteMap.set(found[1], { theme: row[1] || "", terms: row[4] || "" });
         }
         const themes = [], terms = [];

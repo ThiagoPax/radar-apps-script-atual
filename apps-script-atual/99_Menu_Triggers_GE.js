@@ -2,13 +2,15 @@
 // 99_Menu_Triggers_GE.js — Menu único, roteador de edição e automações
 // =============================================================================
 // Rotina diária (seg–sex):
-//   06:00  rotinaManhaGE          calendário, breaks, médias, novo dia, Hoje
-//   17:58+ geTickAoVivoGE (1/min) sincroniza Hoje + motor durante o programa
+//   06:00  rotinaManhaGE          virada crítica: Histórico, Hoje e fila OCR
+//   06:20+ manutenção escalonada  clubes, breaks, base, visões e fatores
+//   17:50  congela a curva oficial de 60 minutos
+//   17:58+ geTickAoVivoGE (1/min) processa apenas linhas alteradas
+//   19:06  fecha audiência, Histórico e auditoria de recomendações
 //   19:00  geImportacaoGE (1ª)    tentativa de localizar transcrição no Drive
-//   19:05  geImportacaoGE (2ª)    idem (processarSpeechDoDia_ é idempotente)
-//   19:10  geImportacaoGE (3ª)    tentativa principal
-//   19:15  geAlertaTranscricaoGE  alerta se ainda não houver transcrição
-//   21:00  geEmailDashboardGE     email dashboard do dia
+//   19:10/19:20/19:30             novas tentativas idempotentes
+//   19:35  geAlertaTranscricaoGE  última tentativa + alerta, se necessário
+//   21:00  geEmailDashboardTriggerGE  Dashboard + Relatório unificado
 
 // -----------------------------------------------------------------------------
 // Menu
@@ -22,13 +24,18 @@ function onOpen() {
         .addItem("🕘 Recuperar transcrição de data anterior", "recuperarTranscricaoPorDataMenuGE")
         .addItem("🧠 Processar conteúdo do dia", "processarConteudoDoDiaGE")
         .addItem("📡 Atualizar audiência/predição", "atualizarAudienciaPredicaoMenuGE")
+        .addItem("🔒 Congelar previsão oficial agora", "congelarPrevisaoMenuGE")
+        .addItem("🏁 Fechar programa agora", "fecharProgramaMenuGE")
         .addSeparator()
-        .addItem("📧 Gerar email dashboard", "gerarEmailDashboardMenuGE")
+        .addItem("📧 Gerar Dashboard + Relatório", "gerarEmailDashboardUnificadoMenuGE")
+        .addItem("👁️ Ver prévia do email", "geEmailPreviaGE")
+        .addItem("✅ Registrar execução do teste editorial", "geEmailRegistrarExecucaoTesteGE")
         .addItem("📄 Gerar PDF audiência minuto a minuto", "gerarPDFAudienciaMenuGE")
         .addSeparator()
         .addItem("⚽ Atualizar calendário dos clubes", "atualizarClubesMenuGE")
         .addItem("📺 Atualizar breaks Globo", "atualizarBreaksMenuGE")
         .addItem("📊 Atualizar médias semanais/mensais", "atualizarMediasMenuGE")
+        .addItem("🩹 Reparar virada do dia", "repararViradaDiaAgoraGE")
         .addItem("🎨 Corrigir formatação do Histórico", "corrigirFormatacaoHistoricoMenuGE")
         .addItem("🔧 Reparar fórmulas quebradas (#NAME?)", "repararFormulasQuebradasMenuGE")
         .addItem("🏗️ Migrar painel TD:TV para aba Painel", "migrarPainelParaAbaMenuGE")
@@ -47,6 +54,11 @@ function onOpen() {
             .addItem("🎯 Backtest de checkpoints (V3)", "rodarBacktestCheckpointsMenuGE")
             .addItem("🔧 Recalcular fatores (clube etc.)", "recalcularFatoresMenuGE")
             .addItem("🔀 Promover/reverter previsão V3", "promoverOuReverterV3MenuGE")
+            .addItem("⚡ Status da Fase 2 online", "statusFase2MenuGE")
+            .addItem("🎯 Consolidar auditoria de ações", "auditoriaAcoesConsolidarMenuGE")
+            .addItem("🧾 Pós-programa + telemetria agora", "rotinaPosProgramaETelemetriaMenuFase2GE")
+            .addItem("📋 Status da auditoria de ações", "auditoriaAcoesStatusGE")
+            .addItem("✅ Executar testes de aceitação Fase 2", "executarTestesAceitacaoFase2GE")
             .addItem("🧹 Limpar cache LLM", "clearLLMCache")
             .addItem("🧹 Limpar stopwords", "clearUserStopwords")
             .addItem("🩺 Verificar sistema (clubes, médias, hoje)", "verificarSistemaMenuGE")
@@ -109,25 +121,6 @@ function processarConteudoDoDiaGE() {
     ui.alert("✅ Conteúdo processado: " + ctx.timeline.length + " minutos." + msgArquivo);
 }
 
-function recuperarTranscricaoPorDataMenuGE() {
-    const ui = SpreadsheetApp.getUi();
-    const prompt = ui.prompt(
-        "🕘 Recuperar transcrição antiga",
-        "Informe DD/MM/AAAA (ex.: 14/10/2026).\n" +
-        "A rotina atualizará apenas TEMA e TERMOS dessa data no Histórico, " +
-        "sem alterar audiência ou disparar emails antigos. As abas analíticas temporárias serão recalculadas.",
-        ui.ButtonSet.OK_CANCEL
-    );
-    if (prompt.getSelectedButton() !== ui.Button.OK) return;
-    try {
-        const result = reprocessarSpeechPorDataGE_(prompt.getResponseText().trim());
-        ui.alert(result.skipped ? "ℹ️ Transcrição já processada." :
-            "✅ Histórico de " + result.programDate + " atualizado com " + result.sourceName);
-    } catch (err) {
-        ui.alert("❌ Falha ao recuperar: " + err.message);
-    }
-}
-
 function importarTranscricaoDoDiaMenuGE() {
     const res = processarSpeechDoDia_();
     const ui = SpreadsheetApp.getUi();
@@ -143,8 +136,20 @@ function importarTranscricaoDoDiaMenuGE() {
 }
 
 function atualizarAudienciaPredicaoMenuGE() {
-    atualizarHojeGE();
-    SpreadsheetApp.getUi().alert("✅ Audiência sincronizada e predição recalculada (veja a aba Hoje).");
+    const r = atualizarHojeGE();
+    SpreadsheetApp.getUi().alert(r && r.modo === "AO_VIVO_RAPIDO"
+        ? "✅ Linhas novas processadas. A previsão oficial permaneceu congelada."
+        : "✅ Audiência sincronizada e cockpit atualizado.");
+}
+
+function congelarPrevisaoMenuGE() {
+    const r = congelarPrevisaoOficialHojeGE_();
+    SpreadsheetApp.getUi().alert("Previsão oficial\n\n" + JSON.stringify(r, null, 2));
+}
+
+function fecharProgramaMenuGE() {
+    const r = fecharProgramaFase2GE();
+    SpreadsheetApp.getUi().alert("Fechamento Fase 2\n\n" + JSON.stringify(r, null, 2));
 }
 
 function atualizarBreaksMenuGE() {
@@ -163,11 +168,18 @@ function atualizarMediasMenuGE() {
 }
 
 function prepararDiaMenuGE() {
-    const res = adicionarNovoDiaCoreGE_(new Date());
-    prepararHojeGE();
-    SpreadsheetApp.getUi().alert(res.ok
-        ? "✅ Novo dia criado no Histórico e aba Hoje preparada."
-        : "ℹ️ Bloco do dia já existia — aba Hoje re-preparada.");
+    const res = criarOuRepararBlocoDiaAtualGE_(new Date());
+    prepararHojeViradaRapidaGE_();
+    try { if (typeof limparFilaOcrGE_ === "function") limparFilaOcrGE_(); } catch (e) { }
+    SpreadsheetApp.getUi().alert("✅ Virada concluída",
+        "Histórico: " + (res.criou ? "novo bloco criado" : "bloco existente reparado") +
+        "\nHoje: preparada para " + res.data +
+        "\nOCR: marcadores do dia anterior limpos.",
+        SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function repararViradaDiaAgoraGE() {
+    return prepararDiaMenuGE();
 }
 
 function definirContextoAtivoGE() {
@@ -207,22 +219,75 @@ function rodarTudoAgoraGE() {
 // -----------------------------------------------------------------------------
 function geOnEditInstalavelGE(e) {
     if (!e || !e.range) return;
+    const telInicioMs = new Date().getTime();
+    let telCtx = null;
+    let telRelevante = false;
     try {
         const sheet = e.range.getSheet();
         const nome = sheet.getName();
         const row = e.range.getRow();
         const col = e.range.getColumn();
 
+        telRelevante = row >= 3 && row <= 62 &&
+            ((nome === CFG.SHEET_HOJE && [4, 5, 9, 10].indexOf(col) >= 0) ||
+             (nome === CFG.GE_OUT_HISTORICO && [4, 6].indexOf(col) >= 0));
+        if (telRelevante && typeof telemetriaGEIniciarContexto_ === "function") {
+            telCtx = telemetriaGEIniciarContexto_("ONEDIT", {
+                source: nome,
+                row: row,
+                message: "col=" + col
+            });
+        }
+
         if (nome === CFG.SHEET_HOJE) {
             // OCR (D) ou manual (E): fast-path — só a linha editada, resposta ~2s.
             // O recompute completo (C, M–R, Histórico) fica com o tick de 1 min.
             if (row >= 3 && row <= 62 && (col === 4 || col === 5)) {
-                try { atualizarLinhaHojeRapidaGE_(row); } catch (err) { }
+                try {
+                    atualizarLinhaHojeRapidaGE_(row);
+                    if (typeof marcarLinhaSujaFase2GE_ === "function") {
+                        marcarLinhaSujaFase2GE_(row, {
+                            value: e.value,
+                            stage: col === 5 ? "MANUAL" : "PREVIA",
+                            priority: col === 5 ? 4 : 1,
+                            source: col === 5 ? "onEdit_manual" : "onEdit_ocr"
+                        });
+                    }
+                    if (typeof telemetriaGEEvento_ === "function") {
+                        telemetriaGEEvento_("ONEDIT", "END", {
+                            status: "OK", source: nome, row: row,
+                            message: "col=" + col,
+                            total_ms: new Date().getTime() - telInicioMs
+                        }, telCtx);
+                    }
+                } catch (err) {
+                    if (typeof telemetriaGEEvento_ === "function") {
+                        telemetriaGEEvento_("ONEDIT", "ERROR", {
+                            status: "ERRO", source: nome, row: row,
+                            message: "col=" + col,
+                            total_ms: new Date().getTime() - telInicioMs,
+                            error: err && err.message ? err.message : String(err)
+                        }, telCtx);
+                    }
+                }
                 return;
             }
-            // Tema (I) ou subtema (J): precisa do motor completo (throttled)
+            // Tema (I) ou subtema (J): marca somente a linha; o tick rápido
+            // atualiza a recomendação sem reconstruir o motor completo.
             if (row >= 3 && row <= 62 && (col === 9 || col === 10)) {
-                if (throttleGE_("hoje_edit", 4)) atualizarHojeGE();
+                // Não prende mais a interface por dezenas de segundos.
+                if (typeof marcarLinhaSujaFase2GE_ === "function") {
+                    marcarLinhaSujaFase2GE_(row, {
+                        stage: "TEMA", priority: 4, source: "onEdit_tema", forceHeavy: false
+                    });
+                } else if (throttleGE_("hoje_edit", 4)) atualizarHojeGE();
+            }
+            if (telRelevante && typeof telemetriaGEEvento_ === "function") {
+                telemetriaGEEvento_("ONEDIT", "END", {
+                    status: "OK", source: nome, row: row,
+                    message: "col=" + col,
+                    total_ms: new Date().getTime() - telInicioMs
+                }, telCtx);
             }
             return;
         }
@@ -235,14 +300,39 @@ function geOnEditInstalavelGE(e) {
                 try { reconstruirCadeiaProjecaoGE_(sheet, row); } catch (err) { }
             }
             if ((col === 4 || col === 6) && row >= 3 && row <= 62) {
-                if (throttleGE_("hist_edit", 4) && typeof ge32_atualizarTYPainelAgora_ === "function") {
+                if (typeof marcarLinhaSujaFase2GE_ === "function") {
+                    marcarLinhaSujaFase2GE_(row, {
+                        value: col === 4 ? e.value : null,
+                        stage: col === 4 ? "MANUAL_HIST" : "TEMA_HIST",
+                        priority: 4, source: "onEdit_historico", forceHeavy: false
+                    });
+                } else if (throttleGE_("hist_edit", 4) && typeof ge32_atualizarTYPainelAgora_ === "function") {
                     try { ge32_atualizarTYPainelAgora_("onEdit_router"); } catch (err) { }
                 }
             }
             try { if (typeof onEditAlertaTemaGE === "function") onEditAlertaTemaGE(e); } catch (err) { }
         }
+
+        if (telRelevante && typeof telemetriaGEEvento_ === "function") {
+            telemetriaGEEvento_("ONEDIT", "END", {
+                status: "OK", source: nome, row: row,
+                message: "col=" + col,
+                total_ms: new Date().getTime() - telInicioMs
+            }, telCtx);
+        }
     } catch (err) {
-        // nunca travar a digitação do usuário
+        if (telRelevante && typeof telemetriaGEEvento_ === "function") {
+            telemetriaGEEvento_("ONEDIT", "ERROR", {
+                status: "ERRO",
+                total_ms: new Date().getTime() - telInicioMs,
+                error: err && err.message ? err.message : String(err)
+            }, telCtx);
+        }
+        // Nunca travar a digitação do usuário.
+    } finally {
+        if (telCtx && typeof telemetriaGEFinalizarContexto_ === "function") {
+            telemetriaGEFinalizarContexto_(telCtx);
+        }
     }
 }
 
@@ -261,29 +351,87 @@ function throttleGE_(chave, segundos) {
 // -----------------------------------------------------------------------------
 // Handlers das automações
 // -----------------------------------------------------------------------------
+function diaUtilGE_(data) {
+    const dia = data.getDay();
+    return dia !== 0 && dia !== 6;
+}
+
+// 06:00 — somente a virada crítica. Esta rotina precisa terminar rápido e
+// independe das reconstruções analíticas pesadas.
 function rotinaManhaGE() {
-    const dia = new Date().getDay();
-    if (dia === 0 || dia === 6) return; // fim de semana
-    const passos = [];
-    try { atualizarClubesAutoGE_(); passos.push("clubes+contexto"); } catch (e) { passos.push("clubes⚠️" + e.message); }
-    try { atualizarBreaksGE(); passos.push("breaks"); } catch (e) { passos.push("breaks⚠️" + e.message); }
-    try { reconstruirBaseGE(); atualizarResumoGE(); atualizarSemanaGE(); atualizarMesGE(); passos.push("médias"); } catch (e) { passos.push("médias⚠️" + e.message); }
-    try { atualizarDiaSemanaGE(); passos.push("dia semana"); } catch (e) { passos.push("dia semana⚠️" + e.message); }
-    try { atualizarMediaPorComentaristaGE_(); passos.push("comentaristas"); } catch (e) { passos.push("comentaristas⚠️" + e.message); }
-    try { recalcularFatoresGE(); passos.push("fatores"); } catch (e) { passos.push("fatores⚠️" + e.message); }
+    const agora = new Date();
+    if (!diaUtilGE_(agora)) return;
+    const inicio = new Date().getTime();
+    logGE_("ROTINA_06H", "INÍCIO | virada crítica");
     try {
-        const r = adicionarNovoDiaCoreGE_(new Date());
-        passos.push(r.ok ? "novo dia criado" : "dia já existia");
-    } catch (e) { passos.push("novo dia⚠️" + e.message); }
-    try { prepararHojeGE(); passos.push("Hoje preparada"); } catch (e) { passos.push("Hoje⚠️" + e.message); }
-    try { if (typeof limparFilaOcrGE_ === "function") limparFilaOcrGE_(); passos.push("fila OCR limpa"); } catch (e) { }
+        const r = criarOuRepararBlocoDiaAtualGE_(agora);
+        prepararHojeViradaRapidaGE_();
+        if (typeof limparFilaOcrGE_ === "function") limparFilaOcrGE_();
+        logGE_("ROTINA_06H", "OK | " + (r.criou ? "bloco criado" : "bloco reparado") +
+            " | Hoje preparada | OCR limpo | " + (new Date().getTime() - inicio) + " ms");
+    } catch (e) {
+        logGE_("ROTINA_06H", "ERRO | " + e.message + " | " +
+            (new Date().getTime() - inicio) + " ms");
+        throw e;
+    }
+}
+
+function executarManutencaoManhaGE_(evento, callback) {
+    const agora = new Date();
+    if (!diaUtilGE_(agora)) return;
+    const inicio = new Date().getTime();
+    logGE_(evento, "INÍCIO");
     try {
-        if (typeof precomputarFatoresTemaPV2GE === "function") {
-            precomputarFatoresTemaPV2GE();
-            passos.push("fatores PV2 cacheados");
-        }
-    } catch (e) { passos.push("fatores PV2⚠️" + e.message); }
-    logGE_("ROTINA_06H", passos.join(" | "));
+        callback();
+        logGE_(evento, "OK | " + (new Date().getTime() - inicio) + " ms");
+    } catch (e) {
+        logGE_(evento, "ERRO | " + e.message + " | " +
+            (new Date().getTime() - inicio) + " ms");
+        throw e;
+    }
+}
+
+function rotinaClubesManhaGE() {
+    executarManutencaoManhaGE_("MANHA_CLUBES", function () { atualizarClubesAutoGE_(); });
+}
+
+function rotinaBreaksManhaGE() {
+    executarManutencaoManhaGE_("MANHA_BREAKS", function () { atualizarBreaksGE(); });
+}
+
+function rotinaBaseManhaGE() {
+    executarManutencaoManhaGE_("MANHA_BASE", function () { reconstruirBaseGE(); });
+}
+
+function rotinaResumoManhaGE() {
+    executarManutencaoManhaGE_("MANHA_RESUMO", function () { atualizarResumoGE(); });
+}
+
+function rotinaVisoesManhaGE() {
+    executarManutencaoManhaGE_("MANHA_VISOES", function () {
+        atualizarSemanaGE();
+        atualizarMesGE();
+        atualizarDiaSemanaGE();
+        try { atualizarMediaPorComentaristaGE_(); }
+        catch (e) { logGE_("MANHA_VISOES", "Comentaristas: " + e.message); }
+    });
+}
+
+function rotinaFatoresManhaGE() {
+    executarManutencaoManhaGE_("MANHA_FATORES", function () { recalcularFatoresGE(); });
+}
+
+function rotinaHojeCompletaManhaGE() {
+    executarManutencaoManhaGE_("MANHA_HOJE_COMPLETA", function () {
+        prepararHojeGE();
+        if (typeof geF3RotinaManhaGE === "function") geF3RotinaManhaGE();
+    });
+}
+
+function rotinaFormatoViradaManhaGE() {
+    executarManutencaoManhaGE_("MANHA_FORMATO_VIRADA", function () {
+        if (typeof finalizarFormatacaoViradaGE_ === "function") finalizarFormatacaoViradaGE_();
+    });
 }
 
 // Tick ao vivo — roda a cada minuto, só age na janela 17:58–19:05
@@ -296,25 +444,98 @@ function geTickAoVivoGE() {
     const dia = agora.getDay();
     if (dia === 0 || dia === 6) return;
 
-    // Guarda de overlap: se o tick anterior ainda roda, pula este (o próximo
-    // vem em 60s). Evita a pilha de execuções disputando o mesmo lock.
+    const telCtx = typeof telemetriaGEIniciarContexto_ === "function" ?
+        telemetriaGEIniciarContexto_("TICK", {
+            source: "trigger_1min",
+            minute: Utilities.formatDate(agora, CFG.TIMEZONE, "HH:mm")
+        }) : null;
+    const telInicioMs = new Date().getTime();
+
+    // O caminho rápido foi desenhado para terminar antes do próximo minuto.
+    // O cache cobre apenas 55 s e impede sobreposição sem mascarar uma fila
+    // travada por muitos minutos.
     let cache = null;
     try {
         cache = CacheService.getScriptCache();
         if (cache.get("tick_running")) {
             logGE_("TICK", "Pulado: tick anterior ainda em execução.");
+            if (typeof telemetriaGEEvento_ === "function") {
+                telemetriaGEEvento_("TICK", "SKIPPED", {
+                    status: "OVERLAP",
+                    source: "trigger_1min",
+                    minute: Utilities.formatDate(agora, CFG.TIMEZONE, "HH:mm"),
+                    total_ms: new Date().getTime() - telInicioMs,
+                    message: "Tick anterior ainda em execução."
+                }, telCtx);
+            }
+            if (typeof telemetriaGEFinalizarContexto_ === "function") telemetriaGEFinalizarContexto_(telCtx);
             return;
         }
-        cache.put("tick_running", "1", 90);
+        cache.put("tick_running", "1", 55);
     } catch (e) { cache = null; }
 
+    const telErros = [];
+    let telDrenadas = 0;
+    let telFase2Linhas = 0;
+    let telFase2Ms = 0;
+    let telFase3Ms = 0;
+    let telFechou = false;
     try {
-        // Drena a fila OCR no início e no fim → gravação efetiva a cada ~30s.
-        try { if (typeof drenarFilaOcrGE_ === "function") drenarFilaOcrGE_(); } catch (e) { }
-        try { atualizarHojeGE(); } catch (e) { logGE_("TICK", "⚠️ " + e.message); }
-        try { if (typeof drenarFilaOcrGE_ === "function") drenarFilaOcrGE_(); } catch (e) { }
+        // Compatibilidade com versões antigas que ainda deixaram item na fila.
+        try { if (typeof drenarFilaOcrGE_ === "function") telDrenadas = drenarFilaOcrGE_() || 0; }
+        catch (e) { telErros.push("drenagem: " + e.message); }
+
+        if (typeof processarFase2OnlineGE_ === "function") {
+            try {
+                const f2 = processarFase2OnlineGE_();
+                telFase2Linhas = f2 && f2.processed || 0;
+                telFase2Ms = f2 && f2.total_ms || 0;
+            } catch (e) {
+                telErros.push("fase2_fast: " + e.message);
+                logGE_("FASE2", "⚠️ caminho rápido: " + e.message);
+            }
+        } else {
+            telErros.push("arquivo 44_Fase2_Online_GE ausente");
+        }
+
+        // Fases 3A/3B em SHADOW. O V2 e as colunas oficiais permanecem intactos.
+        if (typeof geF3TickGE === "function") {
+            const inicioF3 = new Date().getTime();
+            try { geF3TickGE(); }
+            catch (e) {
+                telErros.push("fase3_shadow: " + e.message);
+                logGE_("F3_TICK", e.message);
+            }
+            telFase3Ms = new Date().getTime() - inicioF3;
+        }
+
+        // Primeira tentativa de fechamento no próprio último tick; o handler
+        // das 19:10 repete de forma idempotente como segurança.
+        if (minutos >= 19 * 60 + 5) {
+            try {
+                const fechamento = fecharProgramaFase2GE({ consolidarAuditoria: false });
+                telFechou = !!(fechamento && fechamento.ok);
+            } catch (e) { telErros.push("fechamento: " + e.message); }
+        }
+
+        if (typeof telemetriaGEEvento_ === "function") {
+            telemetriaGEEvento_("TICK", "END", {
+                status: telErros.length ? "PARCIAL" : "OK",
+                source: "trigger_1min",
+                minute: Utilities.formatDate(agora, CFG.TIMEZONE, "HH:mm"),
+                readings_count: telDrenadas + telFase2Linhas,
+                rows_count: telFase2Linhas,
+                fast_ms: telFase2Ms,
+                prediction_ms: telFase3Ms,
+                full_reconcile: false,
+                message: telFechou ? "Fechamento executado no tick das 19:05." : "",
+                total_ms: new Date().getTime() - telInicioMs,
+                error: telErros.join(" | ")
+            }, telCtx);
+        }
     } finally {
         try { if (cache) cache.remove("tick_running"); } catch (e) { }
+        if (typeof telemetriaGEFinalizarContexto_ === "function") telemetriaGEFinalizarContexto_(telCtx);
     }
 }
 
@@ -333,18 +554,72 @@ function geImportacaoGE() {
     }
 }
 
-// 19:15 — alerta se a transcrição do dia ainda não foi processada
+function rotinaPreShowFase2GE() {
+    const dia = new Date().getDay();
+    if (dia === 0 || dia === 6) return;
+    try { if (typeof precomputarFatoresTemaPV2GE === "function") precomputarFatoresTemaPV2GE(); }
+    catch (e) { logGE_("PRE_SHOW", "Fatores: " + e.message); }
+    try { congelarPrevisaoOficialHojeGE_(); }
+    catch (e) { logGE_("PRE_SHOW", "Congelamento: " + e.message); }
+    try { if (typeof geF3BPreShowGE === "function") geF3BPreShowGE(); }
+    catch (e) { logGE_("F3B_PRE_SHOW", e.message); }
+}
+
+function geFechamentoEImportacaoGE() {
+    const dia = new Date().getDay();
+    if (dia === 0 || dia === 6) return;
+    try { fecharProgramaFase2GE(); }
+    catch (e) { logGE_("FECHAMENTO_F2", e.message); }
+    geImportacaoGE();
+}
+
+function rotinaPosProgramaETelemetriaFase2GE() {
+    try { rotinaPosProgramaFase2GE(); }
+    catch (e) { logGE_("POS_PROGRAMA_F2", e.message); }
+    try { telemetriaGEConsolidarEResumir(); }
+    catch (e) { logGE_("TELEMETRIA", e.message); }
+}
+
+function rotinaPosProgramaETelemetriaMenuFase2GE() {
+    const r = { pos_programa: null, telemetria: null };
+    try { r.pos_programa = rotinaPosProgramaFase2GE(); }
+    catch (e) { r.pos_programa = { ok: false, error: e.message }; }
+    try { r.telemetria = telemetriaGEConsolidarEResumir(); }
+    catch (e) { r.telemetria = { ok: false, error: e.message }; }
+    SpreadsheetApp.getUi().alert("Pós-programa e telemetria", JSON.stringify(r, null, 2),
+        SpreadsheetApp.getUi().ButtonSet.OK);
+    return r;
+}
+
+// 19:35 — última tentativa e alerta somente se a transcrição continuar ausente.
+// O arquivo pode aparecer no Drive alguns minutos depois das 19:00; por isso
+// não enviamos mais o falso negativo observado às 19:15.
 function geAlertaTranscricaoGE() {
     const dia = new Date().getDay();
     if (dia === 0 || dia === 6) return;
     if (transcricaoDoDiaProcessadaGE_()) return;
-    logGE_("IMPORTACAO", "❌ Transcrição de hoje não localizada até 19:15");
+
+    try {
+        const r = processarSpeechDoDia_();
+        logGE_("IMPORTACAO", "Checagem final 19:35 | " + JSON.stringify({
+            success: r && r.success,
+            skipped: r && r.skipped,
+            arquivo: r && r.sourceName,
+            modo: r && r.sourceMode
+        }).substring(0, 400));
+    } catch (e) {
+        logGE_("IMPORTACAO", "Checagem final 19:35 ⚠️ " + e.message);
+    }
+    if (transcricaoDoDiaProcessadaGE_()) return;
+
+    logGE_("IMPORTACAO", "❌ Transcrição de hoje não localizada até 19:35");
     if (CFG.EMAIL_ENABLED) {
         MailApp.sendEmail({
             to: CFG.EMAIL_DESTINO,
             subject: "⚠️ Gazeta Esportiva — transcrição não encontrada (" +
                 Utilities.formatDate(new Date(), CFG.TIMEZONE, "dd/MM") + ")",
-            body: "A transcrição do programa de hoje não foi localizada no Drive até as 19:15.\n\n" +
+            body: "A transcrição do programa de hoje não foi localizada no Drive até as 19:35, " +
+                "mesmo após a checagem final.\n\n" +
                 "Verifique a pasta de transcrições (arquivo transcricao_DDMMYY.xlsx ou transcricao_YYMMDD.xlsx) ou importe " +
                 "manualmente pelo menu 📺 Gazeta Esportiva Radar → Importar transcrição do dia."
         });
@@ -369,15 +644,18 @@ function transcricaoDoDiaProcessadaGE_() {
     return false;
 }
 
-// 21:00 — email dashboard
+// 21:00 — Dashboard + Relatório unificado (arquivo 82)
 function geEmailDashboardTriggerGE() {
-    const dia = new Date().getDay();
+    const dataLocal = Utilities.formatDate(new Date(), CFG.TIMEZONE, "yyyy-MM-dd");
+    const dia = new Date(dataLocal + "T12:00:00Z").getUTCDay();
     if (dia === 0 || dia === 6) return;
-    try { gerarEmailDashboardGE(); }
+    try { gerarEmailDashboardUnificadoGE(); }
     catch (e) { logGE_("EMAIL", "⚠️ Falha no dashboard 21h: " + e.message); }
     // Placar honesto do dia fechado: V2 vs V3 (shadow mode)
     try { if (typeof registrarShadowLogV3GE_ === "function") registrarShadowLogV3GE_(); }
     catch (e) { logGE_("SHADOW", "⚠️ " + e.message); }
+    try { if (typeof geF3FechamentoGE === "function") geF3FechamentoGE(); }
+    catch (e) { logGE_("F3_FECHAMENTO", e.message); }
 }
 
 // -----------------------------------------------------------------------------
@@ -391,15 +669,32 @@ function instalarTriggersGE() {
     ScriptApp.newTrigger("geTickAoVivoGE").timeBased().everyMinutes(1).create();
 
     const diarios = [
-        ["rotinaManhaGE", CFG.ROTINA_MANHA_HOUR, 0],
-        ["geImportacaoGE", CFG.IMPORT_TENTATIVAS[0].hour, CFG.IMPORT_TENTATIVAS[0].minute],
-        ["geImportacaoGE", CFG.IMPORT_TENTATIVAS[1].hour, CFG.IMPORT_TENTATIVAS[1].minute],
-        ["geImportacaoGE", CFG.IMPORT_TENTATIVAS[2].hour, CFG.IMPORT_TENTATIVAS[2].minute],
-        ["geAlertaTranscricaoGE", CFG.IMPORT_ALERTA_HOUR, CFG.IMPORT_ALERTA_MINUTE],
+        // Virada crítica primeiro; tarefas pesadas ficam isoladas para que um
+        // timeout em Base/Resumo nunca mais impeça Hoje/Histórico de virarem.
+        ["rotinaManhaGE", 6, 0],
+        ["rotinaClubesManhaGE", 6, 20],
+        ["rotinaBreaksManhaGE", 6, 40],
+        ["rotinaBaseManhaGE", 7, 0],
+        ["rotinaResumoManhaGE", 7, 20],
+        ["rotinaVisoesManhaGE", 7, 40],
+        ["rotinaFatoresManhaGE", 8, 0],
+        ["rotinaHojeCompletaManhaGE", 8, 20],
+        ["rotinaFormatoViradaManhaGE", 9, 0],
+
+        // O Drive pode demorar a disponibilizar o XLSX. Quatro tentativas e
+        // o alerta tardio evitam o falso email observado em 14/07.
+        ["geImportacaoGE", 19, 0],
+        ["geFechamentoEImportacaoGE", 19, 10],
+        ["geImportacaoGE", 19, 20],
+        ["geImportacaoGE", 19, 30],
+        ["geAlertaTranscricaoGE", 19, 35],
         ["geEmailDashboardTriggerGE", CFG.EMAIL_DASHBOARD_HOUR, CFG.EMAIL_DASHBOARD_MINUTE],
+        // Consolida os eventos do programa somente depois das tentativas de
+        // importação da transcrição, sem acrescentar I/O à janela ao vivo.
+        ["rotinaPosProgramaETelemetriaFase2GE", 19, 45],
         // Aquece o cache de fatores PV2 antes do ao vivo (o CacheService expira
         // em 6h, então o aquecimento das 06:00 não chega vivo às 18:00).
-        ["precomputarFatoresTemaPV2GE", 17, 40]
+        ["rotinaPreShowFase2GE", 17, 50]
     ];
     // Um trigger diário por rotina (limite de 20 triggers por script);
     // os handlers ignoram sábado/domingo internamente.
@@ -414,10 +709,15 @@ function instalarTriggersMenuGE() {
     instalarTriggersGE();
     SpreadsheetApp.getUi().alert("✅ Gatilhos reinstalados:\n\n" +
         "• onEdit (roteador Hoje/Histórico)\n" +
-        "• Tick ao vivo a cada minuto (17:58–19:05)\n" +
-        "• 06:00 rotina da manhã\n" +
-        "• 19:00 / 19:05 / 19:10 importação da transcrição\n" +
-        "• 19:15 alerta de transcrição ausente\n" +
+        "• 17:50 previsão oficial congelada (60 minutos)\n" +
+        "• Tick Fase 2 a cada minuto (17:58–19:05): somente linhas alteradas; sem motor pesado\n" +
+        "• 06:00 virada crítica (Histórico + Hoje + OCR)\n" +
+        "• 06:20–08:20 manutenção analítica e complementos da Hoje\n" +
+        "• 09:00 finalização visual da virada (regra de share)\n" +
+        "• 19:10 fechamento da audiência + primeira consolidação da auditoria\n" +
+        "• 19:00 / 19:10 / 19:20 / 19:30 importação da transcrição\n" +
+        "• 19:35 checagem final e alerta, se necessário\n" +
+        "• 19:45 pós-programa e consolidação da telemetria\n" +
         "• 21:00 email dashboard");
 }
 
@@ -435,6 +735,18 @@ function statusAutomacaoGE() {
         "Contexto ativo: " + getConfigValueGE_("CONTEXTO_ATIVO", "NORMAL"),
         "Transcrição de hoje: " + (transcricaoDoDiaProcessadaGE_() ? "✅ processada" : "— ainda não")
     ];
+    try {
+        const hojeStr = Utilities.formatDate(new Date(), CFG.TIMEZONE, "dd/MM/yyyy");
+        const ss = SpreadsheetApp.getActive();
+        const hoje = ss.getSheetByName(CFG.SHEET_HOJE);
+        const hist = ss.getSheetByName(CFG.GE_OUT_HISTORICO);
+        const tituloHoje = hoje ? String(hoje.getRange("A1").getDisplayValue()) : "";
+        const dataHist = hist ? hist.getRange("D1").getDisplayValue() : "";
+        checagens.push("Virada Hoje: " + (tituloHoje.indexOf(hojeStr) >= 0 ? "✅ " : "❌ ") + hojeStr);
+        checagens.push("Virada Histórico: " + (dataHist === hojeStr ? "✅ " : "❌ ") + (dataHist || "sem data"));
+    } catch (e) {
+        checagens.push("Virada diária: ⚠️ " + e.message);
+    }
     SpreadsheetApp.getUi().alert("🤖 Status da automação\n\n" +
         "Gatilhos (" + triggers.length + "):\n" + (linhas.join("\n") || "nenhum — use Instalar/renovar gatilhos") +
         "\n\n" + checagens.join("\n"));
@@ -497,4 +809,20 @@ function atualizarClubesMenuGE() {
     SpreadsheetApp.getUi().alert(ok
         ? "⚽ Calendário atualizado: " + n + " jogos na aba Clubes.\nContexto Jogo regenerado."
         : "⚠️ Nenhuma fonte retornou jogos — veja a aba Logs.");
+}
+
+function recuperarTranscricaoPorDataMenuGE() {
+    const ui = SpreadsheetApp.getUi();
+    const prompt = ui.prompt("🕘 Recuperar transcrição antiga",
+        "Informe DD/MM/AAAA. A recuperação atualiza apenas TEMA e TERMOS da data no Histórico.",
+        ui.ButtonSet.OK_CANCEL);
+    if (prompt.getSelectedButton() !== ui.Button.OK) return;
+    try {
+        const result = reprocessarSpeechPorDataGE_(prompt.getResponseText());
+        ui.alert(result.skipped ? "ℹ️ Transcrição já recuperada." :
+            "✅ Histórico de " + result.programDate + " atualizado com " + result.sourceName +
+            ". Audiência preservada.");
+    } catch (err) {
+        ui.alert("❌ Falha ao recuperar: " + err.message);
+    }
 }

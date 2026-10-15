@@ -1,5 +1,6 @@
 // =============================================================================
 // 16_Speech_Integration.js — Integração Speech Timer -> Radar GE
+// Versao completa com rotas de audiencia, relatorios por programa e Speech.
 // =============================================================================
 
 function processarSpeechDoDia_() {
@@ -52,85 +53,6 @@ function processarSpeechDoDia_() {
     }
 }
 
-/**
- * Explicit historical recovery. This only updates TEMA and TERMOS for the
- * selected historical date. Never touch archived audience/share values and
- * never email an old day's editorial report.
- */
-function reprocessarSpeechPorDataGE_(dateText) {
-    const match = String(dateText || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-    if (!match) throw Error("Informe a data no formato DD/MM/AAAA.");
-    const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);
-    const target = new Date(year, month - 1, day);
-    if (target.getFullYear() !== year || target.getMonth() !== month - 1 || target.getDate() !== day) {
-        throw Error("Data inválida.");
-    }
-    const todayKey = formatDateKey_(new Date());
-    if (formatDateKey_(target) === todayKey) {
-        throw Error("Use a importação do dia para processar a data atual.");
-    }
-    const lock = LockService.getScriptLock();
-    lock.waitLock(30000);
-    let sheet = null, originalValues = null, originalNote = "";
-    try {
-        const block = localizarBlocoHistoricoGEPorData_(target);
-        if (!block) throw Error("O dia " + dateText + " ainda não possui bloco no Histórico. Nenhuma alteração foi feita.");
-        const source = buscarArquivoSpeechDoDiaNoDrive_({ expectedDate: target });
-        if (!source || formatDateKey_(source.programDate) !== formatDateKey_(target)) {
-            throw Error("Arquivo XLSX correspondente a " + dateText + " não encontrado no Drive.");
-        }
-        const signature = buildSpeechSignature_(source);
-        if (jaFoiProcessadoSpeechHoje_(signature)) {
-            return { success: true, skipped: true, reason: "already_processed", sourceName: source.fileName };
-        }
-        const ss = getRadarSpreadsheet_();
-        sheet = ss.getSheetByName(CFG.GE_INPUT_SHEET);
-        if (!sheet) throw Error("A aba Input não existe.");
-        originalValues = sheet.getDataRange().getValues();
-        originalNote = sheet.getRange(1, 2).getNote();
-        preencherInputComSpeechGE_(source);
-        const pipeline = executarPipelineCompletoGazeta_({
-            skipArchive: true, skipUi: true, skipEmail: true
-        });
-        const minuto = ss.getSheetByName(CFG.GE_OUT_TIME);
-        if (!minuto || minuto.getLastRow() < 61) throw Error("Saída Minuto não possui 60 linhas.");
-        const rows = minuto.getRange(2, 1, minuto.getLastRow() - 1, 5).getValues();
-        const minuteMap = new Map();
-        for (const row of rows) {
-            const time = row[0] instanceof Date
-                ? Utilities.formatDate(row[0], CFG.TIMEZONE, "HH:mm")
-                : String(row[0] || "").trim();
-            const found = time.match(/(18:\d{2})/);
-            if (found) minuteMap.set(found[1], { theme: row[1] || "", terms: row[4] || "" });
-        }
-        const themes = [], terms = [];
-        for (let min = 0; min < 60; min++) {
-            const key = "18:" + String(min).padStart(2, "0");
-            const value = minuteMap.get(key) || { theme: "", terms: "" };
-            themes.push([value.theme]);
-            terms.push([value.terms]);
-        }
-        if (!themes.some(row => row[0]) && !terms.some(row => row[0])) {
-            throw Error("O processamento não gerou temas ou termos; Histórico preservado.");
-        }
-        block.sheet.getRange(3, block.temaCol, 60, 1).setValues(themes);
-        block.sheet.getRange(3, block.termosCol, 60, 1).setValues(terms);
-        marcarSpeechComoProcessado_(signature, source);
-        logGE_("IMPORTACAO", "Retroativa " + dateText + " importada do arquivo " + source.fileName);
-        return { success: true, skipped: false, programDate: dateText, sourceName: source.fileName, pipeline: pipeline, historico: "temas_e_termos_atualizados" };
-    } finally {
-        // Restore the Input sheet so an older program does not remain as today's input.
-        if (sheet && originalValues) {
-            sheet.clearContents();
-            if (originalValues.length && originalValues[0].length) {
-                sheet.getRange(1, 1, originalValues.length, originalValues[0].length).setValues(originalValues);
-            }
-            sheet.getRange(1, 2).setNote(originalNote);
-        }
-        lock.releaseLock();
-    }
-}
-
 function testeImportacaoSpeechHoje_() {
     return processarSpeechDoDia_();
 }
@@ -155,9 +77,34 @@ function instalarTriggersRadar_() {
 }
 
 function doPost(e) {
+    var route = "unknown";
+    var telCtx = null;
+    if (typeof telemetriaGEIniciarContexto_ === "function") {
+        telCtx = telemetriaGEIniciarContexto_("DOPOST", {
+            received_at: new Date().toISOString(),
+            source: "webapp"
+        });
+    }
+
+    function responder_(resultado) {
+        if (typeof telemetriaGEFinalizarDoPost_ === "function") {
+            return telemetriaGEFinalizarDoPost_(telCtx, route, resultado);
+        }
+        return radarJsonResponse_(resultado);
+    }
+
     try {
         var payload = parseWebhookPayloadRadarRouter_(e);
-        var route = detectarRotaWebhookRadar_(payload);
+        route = detectarRotaWebhookRadar_(payload);
+
+        if (typeof telemetriaGEEvento_ === "function") {
+            telemetriaGEEvento_("DOPOST", "ROUTED", {
+                status: "OK",
+                route: route,
+                source: payload && payload.source,
+                readings_count: payload && payload.readings ? payload.readings.length : 1
+            }, telCtx);
+        }
 
         // ==========================================================
         // ROTA 1 — Audiência GE
@@ -186,29 +133,42 @@ function doPost(e) {
                 };
             }
 
-            return radarJsonResponse_(audienciaResult);
+            return responder_(audienciaResult);
+        }
+
+        // ROTA 2 — fechamento dos demais programas da grade.
+        // Envia email; nao grava esses programas nas abas do Radar.
+        if (route === "audiencia_programa_report") {
+            if (typeof processarRelatorioAudienciaProgramasGE_ !== "function") {
+                return responder_({
+                    success: false,
+                    ok: false,
+                    error: "Arquivo 83_Audiencia_Programas_Email_GE.gs nao instalado."
+                });
+            }
+            return responder_(processarRelatorioAudienciaProgramasGE_(payload));
         }
 
         // ==========================================================
-        // ROTA 2 — Speech Timer / transcrição
+        // ROTA 3 — Speech Timer / transcrição
         // Mantém o fluxo original do Speech.
         // ==========================================================
         if (!CFG.SPEECH_WEBHOOK_ENABLED) {
-            return radarJsonResponse_({
+            return responder_({
                 success: false,
                 error: "Webhook desabilitado"
             });
         }
 
         if (typeof normalizarWebhookSpeechPayload_ !== "function") {
-            return radarJsonResponse_({
+            return responder_({
                 success: false,
                 error: "Função normalizarWebhookSpeechPayload_ não encontrada."
             });
         }
 
         if (typeof processarSpeechImportado_ !== "function") {
-            return radarJsonResponse_({
+            return responder_({
                 success: false,
                 error: "Função processarSpeechImportado_ não encontrada."
             });
@@ -217,10 +177,10 @@ function doPost(e) {
         var sourceData = normalizarWebhookSpeechPayload_(payload);
         var speechResult = processarSpeechImportado_(sourceData);
 
-        return radarJsonResponse_(speechResult);
+        return responder_(speechResult);
 
     } catch (err) {
-        return radarJsonResponse_({
+        return responder_({
             success: false,
             ok: false,
             error: err && err.message ? err.message : String(err),
@@ -266,6 +226,14 @@ function detectarRotaWebhookRadar_(payload) {
 
     if (type === "audiencia_ge") {
         return "audiencia_ge";
+    }
+
+    if (type === "audiencia_programa_report") {
+        return "audiencia_programa_report";
+    }
+
+    if (source.indexOf("monitor_audiencia_v50") >= 0 && payload.report) {
+        return "audiencia_programa_report";
     }
 
     if (source.indexOf("audiencia_ge") >= 0) {
@@ -337,7 +305,9 @@ function executarPipelineCompletoGazeta_(options) {
     if (!ctx) throw Error("Falha ao montar o contexto da análise GE.");
     writeAllOutputsGE_(ctx.timeline, ctx.minuteTopTerms, ctx.stop, ctx.input.rows);
     const report = gerarRelatorioGE_(ctx.timeline);
-    if (CFG.EMAIL_ENABLED && !opts.skipEmail) enviarEmailRelatorioGE_(report);
+    // O relatório fica em cache e será incorporado ao email único das 21h.
+    // Não enviar aqui: evita o segundo email separado.
+    // if (CFG.EMAIL_ENABLED) enviarEmailRelatorioGE_(report);
     if (!opts.skipArchive) {
         const programDate = extrairDataProgramaGE_() || new Date();
         arquivarProgramaGE_(programDate);
@@ -804,14 +774,94 @@ function instalarTriggersRadar() {
 function processarSpeechDoDia() {
     return processarSpeechDoDia_();
 }
-function testeImportacaoSpeechHoje() {
-  return testeImportacaoSpeechHoje_();
+
+// Recuperação histórica isolada: classifica em memória e grava somente TEMA/TERMOS.
+// Usa o mesmo parser de minutos e motor de classificação da importação diária.
+function montarInputSpeechHistoricoGE_(source) {
+    const minutes = new Map();
+    const pattern = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+    for (const line of source.lines || []) {
+        const match = String(line.timestamp || "").trim().match(pattern);
+        const text = String(line.text || "").trim();
+        if (!match || !text) continue;
+        const minute = match[3] ? Number(match[1]) * 60 + Number(match[2]) : Number(match[1]);
+        if (minutes.has(minute)) minutes.get(minute).texto += " " + text;
+        else minutes.set(minute, {
+            originalMinute: minute,
+            originalTimestamp: match[0],
+            texto: text,
+            horaStr: null
+        });
+    }
+    return { rows: Array.from(minutes.values()).sort((a, b) => a.originalMinute - b.originalMinute) };
 }
 
-function instalarTriggersRadar() {
-  return instalarTriggersRadar_();
+function reprocessarSpeechPorDataGE_(dateText) {
+    dateText = String(dateText || "").trim();
+    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(dateText)) throw Error("Informe DD/MM/AAAA.");
+    const target = Utilities.parseDate(dateText, CFG.TIMEZONE, "dd/MM/yyyy");
+    if (Utilities.formatDate(target, CFG.TIMEZONE, "dd/MM/yyyy") !== dateText) throw Error("Data inválida.");
+    if (formatDateKey_(target) >= formatDateKey_(new Date())) throw Error("Selecione uma data anterior a hoje.");
+    const lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try {
+        const block = localizarBlocoHistoricoGEPorData_(target);
+        if (!block) throw Error("O dia " + dateText + " não possui bloco no Histórico.");
+        if (block.termosCol !== block.temaCol + 1) throw Error("Estrutura do Histórico inesperada.");
+        const source = buscarArquivoSpeechDoDiaNoDrive_({ expectedDate: target });
+        if (!source || !source.programDate || formatDateKey_(source.programDate) !== formatDateKey_(target)) {
+            throw Error("XLSX correspondente a " + dateText + " não encontrado no Drive.");
+        }
+        const signature = buildSpeechSignature_(source);
+        const props = PropertiesService.getScriptProperties();
+        const marker = "speech_historical_recovered_" + signature;
+        const resultRange = block.sheet.getRange(3, block.temaCol, 60, 2);
+        const original = resultRange.getValues();
+        if (props.getProperty(marker) === "1" && original.some(row => row[0]) && original.some(row => row[1])) {
+            return { success: true, skipped: true, reason: "already_recovered", programDate: dateText, sourceName: source.fileName };
+        }
+        const input = montarInputSpeechHistoricoGE_(source);
+        if (!input.rows.length) throw Error("Transcrição sem timestamps válidos.");
+        const processed = processAndMapTimestampsGE_(input);
+        const stopwords = getStopwords_();
+        const topTerms = computeTopTermsPerMinute_(processed.rows, stopwords);
+        const timeline = buildTimelineGE_(processed.rows, topTerms, stopwords);
+        const minuteMap = new Map();
+        for (const row of timeline || []) {
+            const time = row.hora instanceof Date ? Utilities.formatDate(row.hora, CFG.TIMEZONE, "HH:mm") : String(row.hora || "").trim();
+            if (!/^18:[0-5]\d$/.test(time) || minuteMap.has(time)) throw Error("Timeline histórica inválida.");
+            minuteMap.set(time, [String(row.tema || ""), String(row.termos || "")]);
+        }
+        if (minuteMap.size !== 60) throw Error("O processamento não gerou os 60 minutos; Histórico preservado.");
+        const values = [];
+        for (let i = 0; i < 60; i++) values.push(minuteMap.get("18:" + String(i).padStart(2, "0")));
+        if (!values.some(row => row[0]) || !values.some(row => row[1])) throw Error("Temas ou termos vazios; Histórico preservado.");
+        // Compara os conteúdos, incluindo fórmulas, para verificar a preservação.
+        const audienceRange = block.sheet.getRange(3, block.audienciaCol, 60, 2);
+        const audienceBefore = JSON.stringify(conteudosSpeechHistoricoGE_(audienceRange));
+        resultRange.setValues(values);
+        SpreadsheetApp.flush();
+        if (JSON.stringify(conteudosSpeechHistoricoGE_(audienceRange)) !== audienceBefore) {
+            throw Error("Audiência foi alterada por outra execução durante a recuperação; confira o Histórico.");
+        }
+        props.setProperty(marker, "1");
+        const result = { success: true, skipped: false, programDate: dateText, sourceName: source.fileName,
+            minutes: values.length, historico: resultRange.getA1Notation(), audiencePreserved: true, inputPreserved: true };
+        logGE_("IMPORTACAO", "Recuperação histórica: " + JSON.stringify(result));
+        Logger.log(JSON.stringify(result));
+        return result;
+    } finally {
+        lock.releaseLock();
+    }
 }
 
-function processarSpeechDoDia() {
-  return processarSpeechDoDia_();
+function conteudosSpeechHistoricoGE_(range) {
+    const values = range.getValues();
+    const formulas = range.getFormulas();
+    return values.map((row, r) => row.map((value, c) => formulas[r][c] || value));
+}
+
+// Entrada explícita para recuperar o incidente de 14/10/2026 pelo editor.
+function recuperarTranscricao14102026GE() {
+    return reprocessarSpeechPorDataGE_("14/10/2026");
 }

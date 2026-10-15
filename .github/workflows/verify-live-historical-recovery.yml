@@ -1,0 +1,16 @@
+name: Verify live historical recovery
+on:
+  push:
+  pull_request:
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: |
+          node --check apps-script-atual/12_Speech_Integration_GE.js
+          node --check apps-script-atual/99_Menu_Triggers_GE.js
+          node tests/historical-recovery.cjs

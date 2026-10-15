@@ -19,6 +19,7 @@ function onOpen() {
         .addItem("▶️ Rodar tudo agora", "rodarTudoAgoraGE")
         .addSeparator()
         .addItem("🎙️ Importar transcrição do dia", "importarTranscricaoDoDiaMenuGE")
+        .addItem("🕘 Recuperar transcrição de data anterior", "recuperarTranscricaoPorDataMenuGE")
         .addItem("🧠 Processar conteúdo do dia", "processarConteudoDoDiaGE")
         .addItem("📡 Atualizar audiência/predição", "atualizarAudienciaPredicaoMenuGE")
         .addSeparator()
@@ -106,6 +107,25 @@ function processarConteudoDoDiaGE() {
         msgArquivo = "\n⚠️ Erro ao arquivar: " + e.message;
     }
     ui.alert("✅ Conteúdo processado: " + ctx.timeline.length + " minutos." + msgArquivo);
+}
+
+function recuperarTranscricaoPorDataMenuGE() {
+    const ui = SpreadsheetApp.getUi();
+    const prompt = ui.prompt(
+        "🕘 Recuperar transcrição antiga",
+        "Informe DD/MM/AAAA (ex.: 14/10/2026).\n" +
+        "A rotina atualizará apenas TEMA e TERMOS dessa data no Histórico, " +
+        "sem alterar audiência ou disparar emails antigos. As abas analíticas temporárias serão recalculadas.",
+        ui.ButtonSet.OK_CANCEL
+    );
+    if (prompt.getSelectedButton() !== ui.Button.OK) return;
+    try {
+        const result = reprocessarSpeechPorDataGE_(prompt.getResponseText().trim());
+        ui.alert(result.skipped ? "ℹ️ Transcrição já processada." :
+            "✅ Histórico de " + result.programDate + " atualizado com " + result.sourceName);
+    } catch (err) {
+        ui.alert("❌ Falha ao recuperar: " + err.message);
+    }
 }
 
 function importarTranscricaoDoDiaMenuGE() {

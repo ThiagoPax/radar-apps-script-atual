@@ -52,6 +52,85 @@ function processarSpeechDoDia_() {
     }
 }
 
+/**
+ * Explicit historical recovery. This only updates TEMA and TERMOS for the
+ * selected historical date. Never touch archived audience/share values and
+ * never email an old day's editorial report.
+ */
+function reprocessarSpeechPorDataGE_(dateText) {
+    const match = String(dateText || "").trim().match(/^(\\d{2})\\/(\\d{2})\\/(\\d{4})$/);
+    if (!match) throw Error("Informe a data no formato DD/MM/AAAA.");
+    const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);
+    const target = new Date(year, month - 1, day);
+    if (target.getFullYear() !== year || target.getMonth() !== month - 1 || target.getDate() !== day) {
+        throw Error("Data inválida.");
+    }
+    const todayKey = formatDateKey_(new Date());
+    if (formatDateKey_(target) === todayKey) {
+        throw Error("Use a importação do dia para processar a data atual.");
+    }
+    const lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    let sheet = null, originalValues = null, originalNote = "";
+    try {
+        const block = localizarBlocoHistoricoGEPorData_(target);
+        if (!block) throw Error("O dia " + dateText + " ainda não possui bloco no Histórico. Nenhuma alteração foi feita.");
+        const source = buscarArquivoSpeechDoDiaNoDrive_({ expectedDate: target });
+        if (!source || formatDateKey_(source.programDate) !== formatDateKey_(target)) {
+            throw Error("Arquivo XLSX correspondente a " + dateText + " não encontrado no Drive.");
+        }
+        const signature = buildSpeechSignature_(source);
+        if (jaFoiProcessadoSpeechHoje_(signature)) {
+            return { success: true, skipped: true, reason: "already_processed", sourceName: source.fileName };
+        }
+        const ss = getRadarSpreadsheet_();
+        sheet = ss.getSheetByName(CFG.GE_INPUT_SHEET);
+        if (!sheet) throw Error("A aba Input não existe.");
+        originalValues = sheet.getDataRange().getValues();
+        originalNote = sheet.getRange(1, 2).getNote();
+        preencherInputComSpeechGE_(source);
+        const pipeline = executarPipelineCompletoGazeta_({
+            skipArchive: true, skipUi: true, skipEmail: true
+        });
+        const minuto = ss.getSheetByName(CFG.GE_OUT_TIME);
+        if (!minuto || minuto.getLastRow() < 61) throw Error("Saída Minuto não possui 60 linhas.");
+        const rows = minuto.getRange(2, 1, minuto.getLastRow() - 1, 5).getValues();
+        const minuteMap = new Map();
+        for (const row of rows) {
+            const time = row[0] instanceof Date
+                ? Utilities.formatDate(row[0], CFG.TIMEZONE, "HH:mm")
+                : String(row[0] || "").trim();
+            const found = time.match(/(18:\\d{2})/);
+            if (found) minuteMap.set(found[1], { theme: row[1] || "", terms: row[4] || "" });
+        }
+        const themes = [], terms = [];
+        for (let min = 0; min < 60; min++) {
+            const key = "18:" + String(min).padStart(2, "0");
+            const value = minuteMap.get(key) || { theme: "", terms: "" };
+            themes.push([value.theme]);
+            terms.push([value.terms]);
+        }
+        if (!themes.some(row => row[0]) && !terms.some(row => row[0])) {
+            throw Error("O processamento não gerou temas ou termos; Histórico preservado.");
+        }
+        block.sheet.getRange(3, block.temaCol, 60, 1).setValues(themes);
+        block.sheet.getRange(3, block.termosCol, 60, 1).setValues(terms);
+        marcarSpeechComoProcessado_(signature, source);
+        logGE_("IMPORTACAO", "Retroativa " + dateText + " importada do arquivo " + source.fileName);
+        return { success: true, skipped: false, programDate: dateText, sourceName: source.fileName, pipeline: pipeline, historico: "temas_e_termos_atualizados" };
+    } finally {
+        // Restore the Input sheet so an older program does not remain as today's input.
+        if (sheet && originalValues) {
+            sheet.clearContents();
+            if (originalValues.length && originalValues[0].length) {
+                sheet.getRange(1, 1, originalValues.length, originalValues[0].length).setValues(originalValues);
+            }
+            sheet.getRange(1, 2).setNote(originalNote);
+        }
+        lock.releaseLock();
+    }
+}
+
 function testeImportacaoSpeechHoje_() {
     return processarSpeechDoDia_();
 }
@@ -258,7 +337,7 @@ function executarPipelineCompletoGazeta_(options) {
     if (!ctx) throw Error("Falha ao montar o contexto da análise GE.");
     writeAllOutputsGE_(ctx.timeline, ctx.minuteTopTerms, ctx.stop, ctx.input.rows);
     const report = gerarRelatorioGE_(ctx.timeline);
-    if (CFG.EMAIL_ENABLED) enviarEmailRelatorioGE_(report);
+    if (CFG.EMAIL_ENABLED && !opts.skipEmail) enviarEmailRelatorioGE_(report);
     if (!opts.skipArchive) {
         const programDate = extrairDataProgramaGE_() || new Date();
         arquivarProgramaGE_(programDate);

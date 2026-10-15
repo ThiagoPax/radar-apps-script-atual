@@ -417,7 +417,7 @@ function arquivarProgramaGE_(programDate) {
 
     var shareFormulas = [];
     for (var row = 3; row <= 62; row++) {
-        shareFormulas.push(['=SE($B' + row + '=0;"";D' + row + '/$B' + row + ')']);
+        shareFormulas.push(['=SE(OU(D' + row + '="";$B' + row + '=0);"";D' + row + '/$B' + row + ')']);
     }
     batchSetFormulasSafeNoApiGE_(hist.getRange(3, 5, 60, 1), shareFormulas);
 
@@ -594,57 +594,39 @@ function restaurarBlocoMensalAposInsercaoGE_(sheet) {
     var LAST = Math.max(94, sheet.getLastRow());
     var n = LAST - FIRST + 1;
     var srcRange = sheet.getRange(FIRST, 8, n, 2); // H66:I{fim}
-    var vals = srcRange.getValues();
-    var fxs = srcRange.getFormulas();
-
-    var hasContent = false;
+    var disp = srcRange.getDisplayValues();
+    var hasContent = false, moved = 0;
     for (var i = 0; i < n; i++) {
-        if ((vals[i][0] !== "" && vals[i][0] != null) ||
-            (vals[i][1] !== "" && vals[i][1] != null) ||
-            fxs[i][0] !== "" || fxs[i][1] !== "") { hasContent = true; break; }
+        for (var j = 0; j < 2; j++) {
+            if (String(disp[i][j] || "") !== "") { hasContent = true; moved++; }
+        }
     }
     if (!hasContent) return 0;
 
-    // Formatos (negrito do MENSAL, 0.00 dos valores, % das diferenças)
-    srcRange.copyTo(sheet.getRange(FIRST, 4, n, 2),
-        SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
-
-    var moved = 0;
-    for (var k = 0; k < n; k++) {
-        var r = FIRST + k;
-
-        // Coluna H -> D
-        if (fxs[k][0]) {
-            sheet.getRange(r, 4).setFormula(
-                fxs[k][0].replace(new RegExp("\\bH" + r + "\\b", "g"), "D" + r));
-            moved++;
-        } else if (vals[k][0] !== "" && vals[k][0] != null) {
-            sheet.getRange(r, 4).setValue(vals[k][0]);
-            moved++;
-        }
-
-        // Coluna I -> E (ex.: "=(B89/H89)-1" volta a ser "=(B89/D89)-1")
-        if (fxs[k][1]) {
-            sheet.getRange(r, 5).setFormula(
-                fxs[k][1].replace(new RegExp("\\bH" + r + "\\b", "g"), "D" + r));
-            moved++;
-        } else if (vals[k][1] !== "" && vals[k][1] != null) {
-            sheet.getRange(r, 5).setValue(vals[k][1]);
-            moved++;
-        }
-    }
-
-    srcRange.clearContent();
-    srcRange.clearFormat();
-
-    // FIX: F66:G{LAST} (TEMA/TERMOS do programa novo, abaixo da linha de
-    // médias) deve ficar VAZIO e SEM cor — o copyTo PASTE_FORMAT do bloco do
-    // dia anterior em rows 63-65 não pode "vazar" para o painel.
-    if (LAST >= 66) {
-        var fgRange = sheet.getRange(66, 6, LAST - 65, 2); // F66:G{LAST}
-        fgRange.clearContent();
-        fgRange.clearFormat();
-    }
+    // Fase 2: a versão anterior fazia até 70 setValue/setFormula separados e
+    // era o principal ponto de timeout da virada. copyPaste PASTE_NORMAL move
+    // valores, fórmulas e formatos de uma vez; as referências relativas H→D
+    // são ajustadas pelo próprio Sheets. O mesmo batch limpa as sobras.
+    var sid = sheet.getSheetId();
+    Sheets.Spreadsheets.batchUpdate({ requests: [
+        { copyPaste: {
+            source: { sheetId: sid, startRowIndex: FIRST - 1, endRowIndex: LAST,
+                startColumnIndex: 7, endColumnIndex: 9 },
+            destination: { sheetId: sid, startRowIndex: FIRST - 1, endRowIndex: LAST,
+                startColumnIndex: 3, endColumnIndex: 5 },
+            pasteType: "PASTE_NORMAL", pasteOrientation: "NORMAL"
+        }},
+        { repeatCell: {
+            range: { sheetId: sid, startRowIndex: FIRST - 1, endRowIndex: LAST,
+                startColumnIndex: 7, endColumnIndex: 9 },
+            cell: {}, fields: "userEnteredValue,userEnteredFormat"
+        }},
+        { repeatCell: {
+            range: { sheetId: sid, startRowIndex: FIRST - 1, endRowIndex: LAST,
+                startColumnIndex: 5, endColumnIndex: 7 },
+            cell: {}, fields: "userEnteredValue,userEnteredFormat"
+        }}
+    ]}, SpreadsheetApp.getActive().getId());
 
     Logger.log("[Painel] Bloco mensal devolvido de H:I para D:E (" + moved + " células); F:G do painel limpo.");
     return moved;
@@ -1390,10 +1372,8 @@ function atualizarCalibragemGE_(sheet) {
     var GXl = columnToLetter_(calibStartCol + 5);
     var GYl = columnToLetter_(calibStartCol + 6);
 
-    // A1 e B1
-    setFormulaSafeNoApiGE_(sheet.getRange(1, 1), "=D63");
-    sheet.getRange(1, 1).setNumberFormat("0.00");
-    sheet.getRange(1, 2).setValue("PREV");
+    // Preserva os indicadores do dia atual mesmo após recalibrar o modelo.
+    atualizarReferenciasDiaAtualHistoricoGE_(sheet);
 
     // Cabeçalhos row 1
     sheet.getRange(1, calibStartCol, 1, 7)
@@ -1847,7 +1827,7 @@ function adicionarNovoDiaCoreGE_(programDate) {
     // ❸ Definir fórmula de share em E (=D/B) — compatível com a previsão futura
     var shareFormulas = [];
     for (var row = 3; row <= 62; row++) {
-        shareFormulas.push(['=SE($B' + row + '=0;"";D' + row + '/$B' + row + ')']);
+        shareFormulas.push(['=SE(OU(D' + row + '="";$B' + row + '=0);"";D' + row + '/$B' + row + ')']);
     }
     batchSetFormulasSafeNoApiGE_(sheet.getRange(3, 5, 60, 1), shareFormulas);
 
@@ -1935,6 +1915,206 @@ function adicionarNovoDiaCoreGE_(programDate) {
     SpreadsheetApp.flush();
 
     return { ok: true, temPrevisao: temPrevisao };
+}
+
+// =============================================================================
+// VIRADA DIÁRIA LEVE E REPARÁVEL
+// =============================================================================
+// A rotina antiga de 06:00 criava o novo bloco somente depois de executar
+// várias reconstruções pesadas. Se a execução atingisse o limite do Apps
+// Script durante adicionarNovoDiaCoreGE_, as colunas D:G já estavam inseridas,
+// mas fórmulas, rodapé e painel ficavam incompletos. A função abaixo é curta,
+// idempotente e pode reparar exatamente esse estado parcial sem apagar leituras
+// reais que eventualmente já tenham chegado ao bloco do dia.
+
+function dataBlocoHistoricoIgualGE_(valor, dataStr) {
+    if (!valor) return false;
+    var s = valor instanceof Date
+        ? Utilities.formatDate(valor, CFG.TIMEZONE, "dd/MM/yyyy")
+        : String(valor).trim();
+    return s === dataStr;
+}
+
+function localizarColunaDataHistoricoGE_(sheet, dataStr) {
+    var lastCol = sheet.getLastColumn();
+    if (lastCol < 4) return -1;
+    var vals = sheet.getRange(1, 4, 1, lastCol - 3).getValues()[0];
+    for (var i = 0; i < vals.length; i += 4) {
+        if (dataBlocoHistoricoIgualGE_(vals[i], dataStr)) return 4 + i;
+    }
+    return -1;
+}
+
+function clonarRegraShareNovoDiaGE_(sheet) {
+    var rules = sheet.getConditionalFormatRules();
+    var out = [];
+    var alterou = false;
+    for (var i = 0; i < rules.length; i++) {
+        var rule = rules[i];
+        var ranges = rule.getRanges();
+        var temOrigem = false;
+        var temDestino = false;
+        for (var j = 0; j < ranges.length; j++) {
+            var rg = ranges[j];
+            if (rg.getRow() === 3 && rg.getNumRows() === 60 && rg.getNumColumns() === 1) {
+                if (rg.getColumn() === 9) temOrigem = true;   // I3:I62
+                if (rg.getColumn() === 5) temDestino = true; // E3:E62
+            }
+        }
+        if (temOrigem && !temDestino) {
+            var novos = ranges.slice();
+            novos.push(sheet.getRange(3, 5, 60, 1));
+            out.push(rule.copy().setRanges(novos).build());
+            alterou = true;
+        } else {
+            out.push(rule);
+        }
+    }
+    if (alterou) sheet.setConditionalFormatRules(out);
+}
+
+function criarOuRepararBlocoDiaAtualGE_(programDate) {
+    programDate = programDate || new Date();
+    var lock = LockService.getDocumentLock();
+    if (!lock.tryLock(30000)) throw new Error("Não foi possível obter o lock da virada diária.");
+
+    try {
+        var ss = SpreadsheetApp.getActive();
+        var sheet = ss.getSheetByName(CFG.GE_OUT_HISTORICO);
+        if (!sheet) throw new Error('A aba "' + CFG.GE_OUT_HISTORICO + '" não existe.');
+
+        var dataStr = Utilities.formatDate(programDate, CFG.TIMEZONE, "dd/MM/yyyy");
+        var colDia = localizarColunaDataHistoricoGE_(sheet, dataStr);
+        var criou = false;
+
+        // Saída rápida: se o bloco já foi reparado, não refaz copyTo,
+        // formatação condicional, 60 fórmulas e painel. Isso evita o timeout
+        // do serviço Planilhas ao repetir manualmente a correção.
+        if (colDia === 4) {
+            var fD63 = sheet.getRange(63, 4).getFormula();
+            var fE3 = sheet.getRange(3, 5).getFormula();
+            var labelD64 = String(sheet.getRange(64, 4).getDisplayValue() || "");
+            var painel = localizarPainelGE_(sheet);
+            var fSemana = painel && painel.rowSemana > 0
+                ? sheet.getRange(painel.rowSemana, 2).getFormula() : "";
+            var fMes = painel && painel.rowMesAtual > 0
+                ? sheet.getRange(painel.rowMesAtual, 2).getFormula() : "";
+            if (fD63 && fE3 && labelD64 && /\bD63\b/.test(fSemana) && /\bD63\b/.test(fMes)) {
+                atualizarReferenciasDiaAtualHistoricoGE_(sheet);
+                try { logGE_("VIRADA_DIA", dataStr + " | referências A1/B1/C/E atualizadas para D; reparo pesado ignorado"); } catch (eFast) { }
+                return {
+                    ok: true,
+                    criou: false,
+                    reparou: false,
+                    jaEstavaOk: true,
+                    data: dataStr,
+                    detalhe: "bloco já íntegro; referências do dia atual revalidadas"
+                };
+            }
+        }
+
+        if (colDia < 0) {
+            // Congela o bloco anterior em uma única operação: leituras reais
+            // permanecem; projeções que ainda eram fórmulas são descartadas.
+            var oldRange = sheet.getRange(3, 4, 60, 1);
+            var oldValues = oldRange.getValues();
+            var oldForms = oldRange.getFormulas();
+            var congelado = [];
+            for (var r = 0; r < 60; r++) {
+                congelado.push([oldForms[r][0] ? "" : oldValues[r][0]]);
+            }
+            oldRange.setValues(congelado);
+
+            sheet.insertColumns(4, 4);
+            if (typeof restaurarBlocoMensalAposInsercaoGE_ === "function") {
+                restaurarBlocoMensalAposInsercaoGE_(sheet);
+            }
+            colDia = 4;
+            criou = true;
+        }
+
+        if (colDia !== 4) {
+            throw new Error("O bloco de " + dataStr + " existe fora da posição mais recente (coluna " + colDia + ").");
+        }
+
+        // Estrutura e formatação. PASTE_FORMAT nunca altera leituras já gravadas.
+        if (sheet.getLastColumn() >= 11) {
+            sheet.getRange(3, 8, 63, 4).copyTo(
+                sheet.getRange(3, 4, 63, 4),
+                SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+                false
+            );
+        }
+        try { sheet.getRange(1, 4, 1, 4).breakApart(); } catch (e0) { }
+        sheet.getRange(1, 4, 1, 4).merge();
+        sheet.getRange(1, 4).setValue(dataStr)
+            .setHorizontalAlignment("center")
+            .setFontWeight("bold")
+            .setBackground("#FADBD8")
+            .setFontColor("#000000");
+        sheet.getRange(2, 4, 1, 4).setValues([["AUDIÊNCIA", "&/MIN", "TEMA", "TERMOS"]])
+            .setFontWeight("bold")
+            .setBackground("#E74C3C")
+            .setFontColor("white")
+            .setHorizontalAlignment("center");
+        sheet.setColumnWidth(4, 90);
+        sheet.setColumnWidth(5, 70);
+        sheet.setColumnWidth(6, 120);
+        sheet.setColumnWidth(7, 200);
+        sheet.getRange(3, 4, 60, 1).setNumberFormat("0.00");
+        sheet.getRange(3, 5, 60, 1).setNumberFormat("0.00");
+
+        // Após inserir D:G, o Sheets desloca as referências antigas para H.
+        // Reancora os indicadores em D sem recalcular B nem alterar audiência.
+        atualizarReferenciasDiaAtualHistoricoGE_(sheet);
+
+        // Rodapé do programa. D63/F63 permanecem vazios antes da primeira leitura.
+        setFormulaSafeNoApiGE_(sheet.getRange(63, 4), '=SEERRO(MÉDIA(D3:D62);"")');
+        var medianaFormula = gerarFormulaMedianaOffsetGE_(sheet, programDate);
+        if (medianaFormula) setFormulaSafeNoApiGE_(sheet.getRange(63, 5), medianaFormula);
+        else sheet.getRange(63, 5).clearContent();
+        setFormulaSafeNoApiGE_(sheet.getRange(63, 6),
+            '=SE(OU(D63="";E63="";E63=0);"";D63/E63-1)');
+
+        var weekday = programDate.getDay();
+        var medianaLabel = { 2: "MEDIANA 3ª", 3: "MEDIANA 4ª", 4: "MEDIANA 5ª", 5: "MEDIANA 6ª" }[weekday] || "MEDIANA";
+        sheet.getRange(64, 4, 2, 1).setValues([["COMENTARISTA 1"], ["COMENTARISTA 2"]]);
+        sheet.getRange(64, 5).setValue(medianaLabel);
+        sheet.getRange(64, 6).setValue("DIFERENÇA");
+
+        // A regra de cor do share reúne centenas de faixas. Regravá-la dentro
+        // da virada crítica pode consumir vários minutos. A estrutura funcional
+        // fica pronta agora; a regra visual é concluída por acionador isolado.
+        try {
+            PropertiesService.getScriptProperties().setProperty(
+                "ge_formatar_virada_pendente", dataStr);
+        } catch (ePendente) { }
+
+        // Inclui D63 na semana e no mês atuais. A função é idempotente e
+        // também cria uma nova semana/mês quando necessário.
+        garantirCamposHistoricoGE_();
+
+        var detalhe = (criou ? "criado" : "reparado") +
+            " | D63/F63 protegidos | semana/mês incluem D63";
+        try { logGE_("VIRADA_DIA", dataStr + " | " + detalhe); } catch (e1) { }
+        return { ok: true, criou: criou, reparou: !criou, data: dataStr, detalhe: detalhe };
+    } finally {
+        lock.releaseLock();
+    }
+}
+
+// Executa fora do caminho crítico das 06:00. É idempotente e não altera
+// valores/fórmulas do programa — apenas garante a regra visual do share E.
+function finalizarFormatacaoViradaGE_() {
+    var props = PropertiesService.getScriptProperties();
+    var pendente = String(props.getProperty("ge_formatar_virada_pendente") || "");
+    if (!pendente) return { ok: true, skipped: true };
+    var sheet = SpreadsheetApp.getActive().getSheetByName(CFG.GE_OUT_HISTORICO);
+    if (!sheet) throw new Error("Aba Histórico não encontrada.");
+    clonarRegraShareNovoDiaGE_(sheet);
+    props.deleteProperty("ge_formatar_virada_pendente");
+    try { logGE_("VIRADA_FORMATO", pendente + " | regra de share concluída"); } catch (eLog) { }
+    return { ok: true, data: pendente };
 }
 
 // Entrada manual via menu (com prompts)
@@ -2129,4 +2309,71 @@ function corrigirColunaBGE() {
     SpreadsheetApp.getUi().alert("✅ Coluna B corrigida",
         "B agora usa apenas dias fechados (sem D). Teste preencher o TEMA em F.",
         SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+// Indicadores do dia corrente: reaplicados após a inserção do bloco D:G e
+// nas repetições da rotina matinal, sem tocar em B3:B62 ou na audiência.
+function atualizarReferenciasDiaAtualHistoricoGE_(sheet) {
+    if (!sheet) throw new Error("Aba Histórico não encontrada.");
+    var top = [[
+        '=ROUND(0,3743+0,7387*D3;2)',
+        '="entre "&TEXT(MAX(0;0,3743+0,7387*D3-0,261);"0.00")&" e "&TEXT(0,3743+0,7387*D3+0,261;"0.00")'
+    ]];
+    var percent = [], share = [];
+    for (var row = 3; row <= 62; row++) {
+        percent.push(['=IF(OR(B' + row + '="";B' + row + '=0;D' + row + '="");"";D' + row + '/B' + row + '-1)']);
+        share.push(['=IF(OR(D' + row + '="";$B' + row + '=0);"";D' + row + '/$B' + row + ')']);
+    }
+    // Uma única atualização atômica evita três recálculos da planilha grande.
+    var apiWritten = false;
+    if (typeof Sheets !== "undefined" && Sheets.Spreadsheets) {
+        try {
+            var sheetId = sheet.getSheetId();
+            var blocks = [
+                { row: 0, col: 0, values: top },
+                { row: 2, col: 2, values: percent },
+                { row: 2, col: 4, values: share }
+            ];
+            var requests = blocks.map(function (block) {
+                return { updateCells: {
+                    range: { sheetId: sheetId, startRowIndex: block.row,
+                        endRowIndex: block.row + block.values.length,
+                        startColumnIndex: block.col, endColumnIndex: block.col + block.values[0].length },
+                    rows: block.values.map(function (row) {
+                        return { values: row.map(function (formula) {
+                            return { userEnteredValue: { formulaValue: formula } };
+                        }) };
+                    }),
+                    fields: "userEnteredValue"
+                } };
+            });
+            Sheets.Spreadsheets.batchUpdate({ requests: requests }, sheet.getParent().getId());
+            apiWritten = true;
+        } catch (errApi) {
+            Logger.log("[Referências do dia] API indisponível, usando gravação nativa: " + errApi.message);
+        }
+    }
+    if (!apiWritten) {
+        batchSetFormulasSafeNoApiGE_(sheet.getRange(1, 1, 1, 2), top);
+        batchSetFormulasSafeNoApiGE_(sheet.getRange(3, 3, 60, 1), percent);
+        batchSetFormulasSafeNoApiGE_(sheet.getRange(3, 5, 60, 1), share);
+    }
+    return { top: "A1:B1", percentual: "C3:C62", share: "E3:E62", audiencia: "D3:D62",
+        gravacao: apiWritten ? "api_atomica" : "nativa" };
+}
+
+// Entrada do editor: aplica somente as fórmulas, sem abrir outro dia ou
+// reinicializar Hoje/OCR. Também permite corrigir o bloco já existente.
+function atualizarReferenciasDiaAtualHistoricoGE() {
+    var lock = LockService.getDocumentLock();
+    if (!lock.tryLock(30000)) throw new Error("Não foi possível obter o lock do Histórico.");
+    try {
+        var sheet = SpreadsheetApp.getActive().getSheetByName(CFG.GE_OUT_HISTORICO);
+        var result = atualizarReferenciasDiaAtualHistoricoGE_(sheet);
+        SpreadsheetApp.flush();
+        Logger.log(JSON.stringify(result));
+        return result;
+    } finally {
+        lock.releaseLock();
+    }
 }

@@ -7,6 +7,7 @@ class Sheet {
   get(r,c) { return this.cells.get(`${r}:${c}`) ?? ''; }
   put(r,c,v) { this.cells.set(`${r}:${c}`,v); }
   getLastColumn() { return 15; }
+  getMaxRows() { return 106; }
   getSheetId() { return 1117157422; }
   getParent() { return {getId:()=> 'radar-test'}; }
   getRange(r,c,n=1,m=1) {

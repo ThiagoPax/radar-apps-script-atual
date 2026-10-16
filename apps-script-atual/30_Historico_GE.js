@@ -569,6 +569,9 @@ function localizarPainelGE_(sheet) {
             p.rowMesAtual = 66 + i;
             p.mesLabel = s;
         }
+        if (p.rowMesAtual > 0 && 66 + i >= p.rowMesAtual && indiceMesPainelGE_(s) >= 0) {
+            p.panelEnd = Math.max(p.panelEnd, 66 + i);
+        }
         var c = (cVals[i][0] || "").toString().trim();
         if (c === "-%") p.panelEnd = Math.max(p.panelEnd, 66 + i);
     }
@@ -577,6 +580,111 @@ function localizarPainelGE_(sheet) {
     }
     return p;
 }
+
+// Referências fornecidas pelo usuário: Rat% de cada mês de 2025 (jan-dez).
+var REFERENCIAS_MENSAIS_GE_ = { 2025: [0.56, 0.63, 0.71, 0.70, 0.65, 0.66, 0.69, 0.72, 0.60, 0.58, 0.65, 0.50] };
+var MESES_PAINEL_GE_ = ["JANEIRO", "FEVEREIRO", "MARÇO", "ABRIL", "MAIO", "JUNHO", "JULHO", "AGOSTO", "SETEMBRO", "OUTUBRO", "NOVEMBRO", "DEZEMBRO"];
+
+function mesChaveHistoricoGE_(value) {
+    var text = value instanceof Date
+        ? Utilities.formatDate(value, CFG.TIMEZONE, "dd/MM/yyyy") : String(value || "").trim();
+    var parts = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(text);
+    return parts ? Number(parts[3]) * 12 + Number(parts[2]) - 1 : null;
+}
+
+function indiceMesPainelGE_(value) {
+    return MESES_PAINEL_GE_.indexOf(String(value || "").replace(/\s*\(.*\)\s*$/, "").trim().toUpperCase());
+}
+
+function formulaDiferencaAnualMensalGE_(row) {
+    return '=IF(OR(B' + row + '="";D' + row + '="";D' + row + '=0);"";B' + row + '/D' + row + '-1)';
+}
+
+function repararPainelMensalHistoricoGE_(sheet) {
+    var panel = localizarPainelGE_(sheet);
+    if (!panel || panel.rowMesAtual < 1) return { ok: false, motivo: "painel_mensal_ausente" };
+    var start = panel.rowMesAtual;
+    var raw = sheet.getRange(start, 1, sheet.getMaxRows() - start + 1, 5).getValues();
+    var header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    var current = mesChaveHistoricoGE_(header[3]);
+    if (current === null) return { ok: false, motivo: "data_atual_ausente" };
+    var year = Math.floor(current / 12), previousMonth = current % 12;
+    var existing = [], references = {}, byMonth = {};
+    for (var i = 0; i < raw.length; i++) {
+        var month = indiceMesPainelGE_(raw[i][0]);
+        if (month < 0) break;
+        if (month > previousMonth) year--;
+        var key = year * 12 + month;
+        if (references.hasOwnProperty(key)) throw new Error("Mês duplicado no painel: " + raw[i][0]);
+        existing.push(key);
+        references[key] = raw[i][3];
+        previousMonth = month;
+    }
+    if (!existing.length) return { ok: false, motivo: "meses_ausentes" };
+    var oldest = existing[existing.length - 1];
+    if (oldest > current || current - oldest > 239) throw new Error("Intervalo mensal inválido.");
+    // Detecta os blocos por suas datas, inclusive dias com o cabeçalho da linha 2 ausente.
+    for (var c = 4; c <= header.length; c += 4) {
+        var period = mesChaveHistoricoGE_(header[c - 1]);
+        if (period === null) break;
+        if (!byMonth[period]) byMonth[period] = [];
+        byMonth[period].push(columnToLetter_(c) + "63");
+    }
+    var sid = sheet.getSheetId(), requests = [], values = [], cursor = 0, inserted = 0;
+    for (var periodKey = current; periodKey >= oldest; periodKey--) {
+        var offset = current - periodKey, row = start + offset;
+        if (existing[cursor] === periodKey) cursor++;
+        else {
+            requests.push({ insertDimension: { range: { sheetId: sid, dimension: "ROWS", startIndex: row - 1, endIndex: row }, inheritFromBefore: true } });
+            requests.push({ copyPaste: {
+                source: { sheetId: sid, startRowIndex: row, endRowIndex: row + 1, startColumnIndex: 0, endColumnIndex: 5 },
+                destination: { sheetId: sid, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 },
+                pasteType: "PASTE_FORMAT", pasteOrientation: "NORMAL"
+            } });
+            inserted++;
+        }
+        var monthIndex = periodKey % 12, periodYear = Math.floor(periodKey / 12);
+        var known = REFERENCIAS_MENSAIS_GE_[periodYear - 1];
+        var reference = known ? known[monthIndex] : references[periodKey];
+        var audience = byMonth[periodKey] || [];
+        values.push([
+            MESES_PAINEL_GE_[monthIndex] + (periodKey === current ? " (mês atual)" : ""),
+            audience.length ? '=IFERROR(AVERAGE(' + audience.join(";") + ');"")' : '=""',
+            periodKey === oldest ? "-%" : '=IF(OR(B' + row + '="";B' + (row + 1) + '="";B' + (row + 1) + '=0);"";B' + row + '/B' + (row + 1) + '-1)',
+            typeof reference === "number" ? reference : "",
+            formulaDiferencaAnualMensalGE_(row)
+        ]);
+    }
+    requests.push({ updateCells: {
+        range: { sheetId: sid, startRowIndex: start - 1, endRowIndex: start - 1 + values.length, startColumnIndex: 0, endColumnIndex: 5 },
+        rows: values.map(function(row) { return { values: row.map(function(value) {
+            if (typeof value === "number") return { userEnteredValue: { numberValue: value } };
+            return { userEnteredValue: value.charAt(0) === "=" ? { formulaValue: value } : { stringValue: value } };
+        }) }; }), fields: "userEnteredValue"
+    } });
+    [2, 4].forEach(function(col) { requests.push({ repeatCell: {
+        range: { sheetId: sid, startRowIndex: start - 1, endRowIndex: start - 1 + values.length, startColumnIndex: col, endColumnIndex: col + 1 },
+        cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: col === 2 ? "+0.0%;-0.0%" : "0.00%" } } },
+        fields: "userEnteredFormat.numberFormat"
+    } }); });
+    // Inserções, preenchimento e fórmulas têm de concluir juntos.
+    Sheets.Spreadsheets.batchUpdate({ requests: requests }, sheet.getParent().getId());
+    return { ok: true, inicio: start, fim: start + values.length - 1, meses: values.length, inseridos: inserted, referencias: "2025 jan-dez", gravacao: "api_atomica" };
+}
+
+function repararPainelMensalHistoricoGE() {
+    var lock = LockService.getDocumentLock();
+    if (!lock.tryLock(30000)) throw new Error("Não foi possível obter o lock do Histórico.");
+    try {
+        var sheet = SpreadsheetApp.getActive().getSheetByName(CFG.GE_OUT_HISTORICO);
+        var result = repararPainelMensalHistoricoGE_(sheet);
+        PropertiesService.getScriptProperties().setProperty("ge_referencias_mensais_2025", JSON.stringify(REFERENCIAS_MENSAIS_GE_[2025]));
+        SpreadsheetApp.flush();
+        Logger.log(JSON.stringify(result));
+        return result;
+    } finally { lock.releaseLock(); }
+}
+
 
 // =============================================================================
 // restaurarBlocoMensalAposInsercaoGE_ — devolve o bloco MENSAL de H:I para D:E
@@ -608,7 +716,7 @@ function restaurarBlocoMensalAposInsercaoGE_(sheet) {
     // valores, fórmulas e formatos de uma vez; as referências relativas H→D
     // são ajustadas pelo próprio Sheets. O mesmo batch limpa as sobras.
     var sid = sheet.getSheetId();
-    Sheets.Spreadsheets.batchUpdate({ requests: [
+    var requests = [
         { copyPaste: {
             source: { sheetId: sid, startRowIndex: FIRST - 1, endRowIndex: LAST,
                 startColumnIndex: 7, endColumnIndex: 9 },
@@ -626,7 +734,19 @@ function restaurarBlocoMensalAposInsercaoGE_(sheet) {
                 startColumnIndex: 5, endColumnIndex: 7 },
             cell: {}, fields: "userEnteredValue,userEnteredFormat"
         }}
-    ]}, SpreadsheetApp.getActive().getId());
+    ];
+    var panel = localizarPainelGE_(sheet);
+    if (panel && panel.rowMesAtual > 0 && panel.panelEnd >= panel.rowMesAtual) {
+        var rowsE = [];
+        for (var rowE = panel.rowMesAtual; rowE <= panel.panelEnd; rowE++) {
+            rowsE.push({ values: [{ userEnteredValue: { formulaValue: formulaDiferencaAnualMensalGE_(rowE) } }] });
+        }
+        requests.push({ updateCells: {
+            range: { sheetId: sid, startRowIndex: panel.rowMesAtual - 1, endRowIndex: panel.panelEnd, startColumnIndex: 4, endColumnIndex: 5 },
+            rows: rowsE, fields: "userEnteredValue"
+        } });
+    }
+    Sheets.Spreadsheets.batchUpdate({ requests: requests }, sheet.getParent().getId());
 
     Logger.log("[Painel] Bloco mensal devolvido de H:I para D:E (" + moved + " células); F:G do painel limpo.");
     return moved;
@@ -871,42 +991,8 @@ function preencherBlocoA66E85HistoricoGE_(sheet) {
         painel = localizarPainelGE_(sheet);
     }
 
-    // ───────────────────────── MÊS ─────────────────────────
-    if (!painel || painel.rowMesAtual < 0) {
-        Logger.log("[Painel] ⚠️ Linha '(mês atual)' não encontrada — bloco mensal não atualizado.");
-        return;
-    }
+    repararPainelMensalHistoricoGE_(sheet);
 
-    var nomeMesLabel = painel.mesLabel.replace(/\s*\(.*\)\s*$/, "").trim().toUpperCase();
-    var nomeMesProg = MONTH_NAMES_PT[maisRecente.getMonth()];
-
-    if (nomeMesLabel === nomeMesProg) {
-        if (injetarD63(sheet.getRange(painel.rowMesAtual, 2))) {
-            Logger.log("[Painel] D63 incluído no mês atual (B" + painel.rowMesAtual + ").");
-        }
-    } else {
-        var rm = painel.rowMesAtual;
-        // 1) Rebaixa o label do mês que fechou: "JUNHO (mês atual)" -> "JUNHO"
-        sheet.getRange(rm, 1).setValue(nomeMesLabel);
-        // 2) Insere a linha do novo mês no topo da seção mensal
-        //    (o header "MENSAL" em D fica na linha acima e não se move)
-        sheet.insertRowsBefore(rm, 1);
-        // 3) Formato herdado da linha de baixo (o ex-mês atual)
-        sheet.getRange(rm + 1, 1, 1, 5).copyTo(sheet.getRange(rm, 1, 1, 5),
-            SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
-        // 4) Conteúdo do novo mês
-        sheet.getRange(rm, 1).setValue(nomeMesProg + " (mês atual)");
-        // FIX: pt-BR via setFormulaSafeNoApiGE_
-        setFormulaSafeNoApiGE_(sheet.getRange(rm, 2), "=MÉDIA(D63)");
-        setFormulaSafeNoApiGE_(sheet.getRange(rm, 3),
-            '=SE(OU(B' + (rm + 1) + '="";B' + (rm + 1) + '=0);"";(B' + rm + '/B' + (rm + 1) + ')-1)');
-        // D fica vazio: é a referência mensal MANUAL (consolidado Kantar).
-        // E protegido: vazio enquanto D estiver vazio; vira (B/D)-1 ao preencher.
-        setFormulaSafeNoApiGE_(sheet.getRange(rm, 5),
-            '=SE(OU(D' + rm + '="";D' + rm + '=0);"";(B' + rm + '/D' + rm + ')-1)');
-        Logger.log("[Painel] Novo mês criado na linha " + rm + ": " + nomeMesProg +
-            " — preencha a referência mensal em D" + rm + " quando disponível.");
-    }
 }
 
 // --- Média por semana GE ---
@@ -1848,7 +1934,10 @@ function adicionarNovoDiaCoreGE_(programDate) {
                 ? Utilities.formatDate(existing, "America/Sao_Paulo", "dd/MM/yyyy")
                 : existing.toString().trim();
             if (existStr === dateStr) {
-                if (dPos === 0) repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
+                if (dPos === 0) {
+                    repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
+                    repararPainelMensalHistoricoGE_(sheet);
+                }
                 return { ok: false, motivo: "duplicada" };
             }
         }
@@ -1884,6 +1973,7 @@ function adicionarNovoDiaCoreGE_(programDate) {
 
     sheet.getRange(63, 8, 3, 4).copyTo(sheet.getRange(63, 4, 3, 4), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
     repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
+    repararPainelMensalHistoricoGE_(sheet);
 
     sheet.getRange(2, 4, 1, 4).setValues([["AUDIÊNCIA", "&/MIN", "TEMA", "TERMOS"]]);
     sheet.getRange(2, 4, 1, 4)
@@ -2044,6 +2134,7 @@ function criarOuRepararBlocoDiaAtualGE_(programDate) {
         // do serviço Planilhas ao repetir manualmente a correção.
         if (colDia === 4) {
             repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
+            repararPainelMensalHistoricoGE_(sheet);
             var fD63 = sheet.getRange(63, 4).getFormula();
             var fE3 = sheet.getRange(3, 5).getFormula();
             var labelD64 = String(sheet.getRange(64, 4).getDisplayValue() || "");
@@ -2107,6 +2198,7 @@ function criarOuRepararBlocoDiaAtualGE_(programDate) {
             .setBackground("#FADBD8")
             .setFontColor("#000000");
         repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
+        repararPainelMensalHistoricoGE_(sheet);
         sheet.getRange(2, 4, 1, 4).setValues([["AUDIÊNCIA", "&/MIN", "TEMA", "TERMOS"]])
             .setFontWeight("bold")
             .setBackground("#E74C3C")
@@ -2418,4 +2510,5 @@ function atualizarReferenciasDiaAtualHistoricoGE() {
         lock.releaseLock();
     }
 }
+
 

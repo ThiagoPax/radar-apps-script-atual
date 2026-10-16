@@ -13,3 +13,5 @@ jobs:
       - run: |
           node --check apps-script-atual/30_Historico_GE.js
           node tests/morning-rollover.cjs apps-script-atual/30_Historico_GE.js
+
+          node tests/monthly-panel.cjs apps-script-atual/30_Historico_GE.js

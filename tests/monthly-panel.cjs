@@ -3,7 +3,8 @@ const source=fs.readFileSync(process.argv[2]||'monthly-history-after.js','utf8')
 const months=['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
 const refs=[.56,.63,.71,.70,.65,.66,.69,.72,.60,.58,.65,.50];
 class Sheet {
- constructor(){this.cells=new Map;this.maxRows=106;this.insertions=0;this.calls=[];}
+ constructor(){this.cells=new Map;this.maxRows=106;this.insertions=0;this.calls=[];this.rules=[];}
+ autoResizeRows(start,count){this.resized={start,count};}
  get(r,c){return this.cells.get(`${r}:${c}`)??'';}
  put(r,c,v){this.cells.set(`${r}:${c}`,v);}
  getMaxRows(){return this.maxRows;}
@@ -29,10 +30,15 @@ function setup(){
  sheet.put(106,1,'JANEIRO');sheet.put(106,3,'-%');sheet.put(106,4,.56);
  sheet.put(63,4,'fórmula diária preservada');sheet.put(63,8,.74);sheet.put(65,4,'MULLER');
  const ctx={Date,CFG:{TIMEZONE:'America/Sao_Paulo',GE_OUT_HISTORICO:'Histórico'},Utilities:{formatDate:d=>new Intl.DateTimeFormat('en-GB',{timeZone:'America/Sao_Paulo'}).format(d)},Logger:{log:()=>{}},SpreadsheetApp:{getActive:()=>({getId:()=> 'radar-test',getSheetByName:()=>sheet}),flush:()=>{}},LockService:{getDocumentLock:()=>({tryLock:()=>true,releaseLock:()=>{}})},PropertiesService:{getScriptProperties:()=>({setProperty:(key,value)=>{ctx.savedProperty={key,value};}})}};
- ctx.Sheets={Spreadsheets:{batchUpdate:(body,id)=>{
+ ctx.Sheets={Spreadsheets:{get:(id,options)=>{
+  assert.ok(+options.ranges[0].split(':E')[1]<=sheet.maxRows);
+  return{sheets:[{properties:{sheetId:1117157422},conditionalFormats:sheet.rules}]};
+ },batchUpdate:(body,id)=>{
   assert.equal(id,'radar-test');sheet.calls.push(body);
   for(const req of body.requests){
    assert.equal(Object.keys(req).length,1);
+   if(req.deleteConditionalFormatRule)sheet.rules.splice(req.deleteConditionalFormatRule.index,1);
+   if(req.addConditionalFormatRule)sheet.rules.splice(req.addConditionalFormatRule.index,0,req.addConditionalFormatRule.rule);
    if(req.insertDimension){const r=req.insertDimension.range;assert.equal(r.dimension,'ROWS');assert.equal(r.endIndex-r.startIndex,1);sheet.insert(r.startIndex+1);}
    if(req.updateCells){const u=req.updateCells,r=u.range;assert.equal(u.rows.length,r.endRowIndex-r.startRowIndex);assert.ok(r.endRowIndex<=sheet.maxRows);
     u.rows.forEach((row,i)=>{assert.equal(row.values.length,r.endColumnIndex-r.startColumnIndex);row.values.forEach((cell,j)=>{const v=cell.userEnteredValue;sheet.put(r.startRowIndex+i+1,r.startColumnIndex+j+1,v?.formulaValue??v?.stringValue??v?.numberValue??'');});});}
@@ -87,3 +93,13 @@ function setup(){
  const {ctx}=setup();ctx.repararPainelMensalHistoricoGE();assert.deepEqual(JSON.parse(ctx.savedProperty.value),refs);
 }
 console.log('Monthly checks passed: missing February, all 2025 references, guarded YoY, stable month labels, no duplication, future November/December, skipped months, panel bounds and daily-column restore.');
+// As regras do Radar não se duplicam, migram de I para E e crescem com a tabela.
+{
+ const {sheet,ctx}=setup();const unrelated={ranges:[{sheetId:1117157422,startRowIndex:2,endRowIndex:62,startColumnIndex:2,endColumnIndex:3}],gradientRule:{minpoint:{type:'MIN'}}};
+ sheet.rules=[unrelated,{ranges:[{sheetId:1117157422,startRowIndex:97,endRowIndex:107,startColumnIndex:8,endColumnIndex:9}],booleanRule:{condition:{type:'CUSTOM_FORMULA',values:[{userEnteredValue:'=N("RADAR_MENSAL_ANUAL_POS")=0'}]}}}];
+ ctx.repararPainelMensalHistoricoGE_(sheet);ctx.repararPainelMensalHistoricoGE_(sheet);
+ assert.equal(sheet.rules.length,3);assert.equal(sheet.rules[2],unrelated);
+ assert.equal(sheet.resized.start,98);assert.equal(sheet.resized.count,10);
+ sheet.put(1,4,new Date('2026-11-02T12:00:00Z'));ctx.repararPainelMensalHistoricoGE_(sheet);
+ assert.equal(sheet.rules.length,3);assert.equal(sheet.rules[0].ranges[0].endRowIndex,108);assert.equal(sheet.rules[0].ranges[0].startColumnIndex,4);
+}

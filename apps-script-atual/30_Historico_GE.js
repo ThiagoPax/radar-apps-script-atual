@@ -600,6 +600,54 @@ function formulaDiferencaAnualMensalGE_(row) {
     return '=IF(OR(B' + row + '="";D' + row + '="";D' + row + '=0);"";B' + row + '/D' + row + '-1)';
 }
 
+// Formatação mensal reaplicada com o intervalo real, inclusive após crescer.
+function planejarFormatacaoPainelMensalGE_(sheet, first, last) {
+    var sid = sheet.getSheetId();
+    var metadata = Sheets.Spreadsheets.get(sheet.getParent().getId(), {
+        ranges: ["'" + CFG.GE_OUT_HISTORICO + "'!A" + first + ":E" + Math.min(last, sheet.getMaxRows())],
+        fields: "sheets(properties(sheetId),conditionalFormats)"
+    });
+    var target = (metadata.sheets || []).filter(function(s) { return s.properties.sheetId === sid; })[0];
+    if (!target) throw new Error("Não foi possível ler a formatação do Histórico.");
+    var before = [], after = [], rules = target.conditionalFormats || [];
+    // Remover só nossas regras, inclusive cópias deslocadas para I na virada.
+    for (var i = rules.length - 1; i >= 0; i--) {
+        var condition = rules[i].booleanRule && rules[i].booleanRule.condition;
+        var formula = condition && condition.values && condition.values[0].userEnteredValue;
+        if (formula && formula.indexOf("RADAR_MENSAL_ANUAL_") >= 0) {
+            before.push({ deleteConditionalFormatRule: { sheetId: sid, index: i } });
+        }
+    }
+    var full = { sheetId: sid, startRowIndex: first - 1, endRowIndex: last, startColumnIndex: 0, endColumnIndex: 5 };
+    var border = { style: "SOLID", color: { red: 0, green: 0, blue: 0 } };
+    after.push({ updateBorders: { range: full, top: border, bottom: border, left: border, right: border, innerHorizontal: border, innerVertical: border } });
+    after.push({ repeatCell: {
+        range: { sheetId: sid, startRowIndex: first - 1, endRowIndex: last, startColumnIndex: 0, endColumnIndex: 1 },
+        cell: { userEnteredFormat: { wrapStrategy: "WRAP", verticalAlignment: "MIDDLE" } },
+        fields: "userEnteredFormat.wrapStrategy,userEnteredFormat.verticalAlignment"
+    } });
+    var annual = { sheetId: sid, startRowIndex: first - 1, endRowIndex: last, startColumnIndex: 4, endColumnIndex: 5 };
+    after.push({ repeatCell: {
+        range: annual,
+        cell: { userEnteredFormat: { backgroundColor: { red: 1, green: 1, blue: 1 }, textFormat: { foregroundColor: { red: 0, green: 0, blue: 0 } } } },
+        fields: "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor"
+    } });
+    [
+        { tag: "POS", operator: ">", background: { red: 0.8352941, green: 0.9607843, blue: 0.8901961 }, text: { red: 0.11764706, green: 0.5176471, blue: 0.28627452 } },
+        { tag: "NEG", operator: "<", background: { red: 0.98039216, green: 0.85882354, blue: 0.84705883 }, text: { red: 0.57254905, green: 0.16862746, blue: 0.12941177 } }
+    ].forEach(function(style) {
+        after.push({ addConditionalFormatRule: { index: 0, rule: {
+            ranges: [annual],
+            booleanRule: {
+                condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: '=AND(ISNUMBER($E' + first + ');$E' + first + style.operator + '0;N("RADAR_MENSAL_ANUAL_' + style.tag + '")=0)' }] },
+                format: { backgroundColor: style.background, textFormat: { foregroundColor: style.text } }
+            }
+        } } });
+    });
+    return { before: before, after: after };
+}
+
+
 function repararPainelMensalHistoricoGE_(sheet) {
     var panel = localizarPainelGE_(sheet);
     if (!panel || panel.rowMesAtual < 1) return { ok: false, motivo: "painel_mensal_ausente" };
@@ -630,7 +678,8 @@ function repararPainelMensalHistoricoGE_(sheet) {
         if (!byMonth[period]) byMonth[period] = [];
         byMonth[period].push(columnToLetter_(c) + "63");
     }
-    var sid = sheet.getSheetId(), requests = [], values = [], cursor = 0, inserted = 0;
+    var visual = planejarFormatacaoPainelMensalGE_(sheet, start, start + current - oldest);
+    var sid = sheet.getSheetId(), requests = visual.before.slice(), values = [], cursor = 0, inserted = 0;
     for (var periodKey = current; periodKey >= oldest; periodKey--) {
         var offset = current - periodKey, row = start + offset;
         if (existing[cursor] === periodKey) cursor++;
@@ -667,8 +716,11 @@ function repararPainelMensalHistoricoGE_(sheet) {
         cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: col === 2 ? "+0.0%;-0.0%" : "0.00%" } } },
         fields: "userEnteredFormat.numberFormat"
     } }); });
-    // Inserções, preenchimento e fórmulas têm de concluir juntos.
+    // Inserções, preenchimento, bordas e regras concluem juntos.
+    requests = requests.concat(visual.after);
     Sheets.Spreadsheets.batchUpdate({ requests: requests }, sheet.getParent().getId());
+    // A altura acompanha o texto e a largura atual de A, sem ampliar a coluna.
+    sheet.autoResizeRows(start, values.length);
     return { ok: true, inicio: start, fim: start + values.length - 1, meses: values.length, inseridos: inserted, referencias: "2025 jan-dez", gravacao: "api_atomica" };
 }
 
@@ -2510,5 +2562,6 @@ function atualizarReferenciasDiaAtualHistoricoGE() {
         lock.releaseLock();
     }
 }
+
 
 

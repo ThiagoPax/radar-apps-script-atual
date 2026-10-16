@@ -633,55 +633,132 @@ function restaurarBlocoMensalAposInsercaoGE_(sheet) {
 }
 
 // =============================================================================
-// gerarFormulaMedianaOffsetGE_ — mediana do mesmo dia da semana (padrão OFFSET)
+// Rodapé do dia: média, mediana do Resumo e diferença, reparados em um lote.
 // =============================================================================
-// Reproduz o padrão da planilha para E63 do novo bloco:
-//   =(MEDIAN(OFFSET(X63,0,0,1,1),OFFSET(X63,0,20),OFFSET(X63,0,40),...))
-// Âncora = coluna de AUDIÊNCIA mais recente com o MESMO dia da semana do novo
-// programa; passo de 20 colunas = 5 programas = 1 semana (o programa vai ao ar
-// seg-sex SEM exceção, então o passo nunca desalinha). O número de termos
-// replica o da fórmula do bloco anterior (I63, já deslocada), fallback 14.
-// Retorna a fórmula em sintaxe en-US (para Range.setFormula nativo, que é
-// independente de locale) ou null se não houver âncora.
-// -----------------------------------------------------------------------------
+function diaSemanaRodapeHistoricoGE_(sheet, programDate) {
+    // A data do bloco prevalece sobre o relógio da execução (inclusive em reparos).
+    var value = sheet.getRange(1, 4).getValue();
+    var dateStr = value instanceof Date
+        ? Utilities.formatDate(value, CFG.TIMEZONE, "dd/MM/yyyy") : String(value || "").trim();
+    var parts = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(dateStr);
+    if (!parts) {
+        dateStr = Utilities.formatDate(programDate || new Date(), CFG.TIMEZONE, "dd/MM/yyyy");
+        parts = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(dateStr);
+    }
+    if (!parts) throw new Error("Data inválida para o rodapé do Histórico: " + dateStr);
+    return new Date(Date.UTC(Number(parts[3]), Number(parts[2]) - 1, Number(parts[1]))).getUTCDay();
+}
+
+function gerarFormulaMedianaResumoGE_(sheet, programDate) {
+    var weekday = diaSemanaRodapeHistoricoGE_(sheet, programDate);
+    var col = { 1: "B", 2: "C", 3: "D", 4: "E", 5: "F" }[weekday];
+    // Linha 3 conforme solicitado. O intervalo aberto inclui as novas semanas;
+    // MEDIAN ignora vazios, sem descartar zeros válidos.
+    return col ? '=IFERROR(MEDIAN(\'Resumo\'!' + col + '3:' + col + ');"")' : '=""';
+}
+
+// Compatibilidade com chamadas antigas: nenhuma abertura volta a usar OFFSET.
 function gerarFormulaMedianaOffsetGE_(sheet, programDate) {
-    var audColsHist = getAudColsGE_(sheet).filter(function(c) { return c !== 4; });
-    if (audColsHist.length === 0) return null;
+    return gerarFormulaMedianaResumoGE_(sheet, programDate);
+}
 
-    var row1Vals = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    var weekday = programDate.getDay();
-
-    var anchorCol = null;
-    for (var i = 0; i < audColsHist.length; i++) { // newest-first
-        var c = audColsHist[i];
-        var v = row1Vals[c - 1];
-        var d = v instanceof Date ? v
-            : parseDateStr_(typeof v === "string" ? v.trim() : "");
-        if (d && d.getDay() === weekday) { anchorCol = c; break; }
+function repararRodapeDiaAtualHistoricoGE_(sheet, programDate) {
+    if (!sheet) throw new Error("Aba Histórico não encontrada.");
+    var weekday = diaSemanaRodapeHistoricoGE_(sheet, programDate);
+    var medianFormula = gerarFormulaMedianaResumoGE_(sheet, programDate);
+    var labels = sheet.getRange(64, 4, 2, 1).getValues();
+    // Repetir o reparo mantém os nomes já escolhidos pelo usuário.
+    var comentarista1 = String(labels[0][0] || "COMENTARISTA 1");
+    var comentarista2 = String(labels[1][0] || "COMENTARISTA 2");
+    var top = [[
+        '=IFERROR(AVERAGE(D3:D62);"")',
+        medianFormula,
+        '=IF(OR(D63="";E63="";E63=0);"";D63/E63-1)'
+    ]];
+    var legend = [[comentarista1, weekday >= 1 && weekday <= 5
+        ? "MEDIANA " + (weekday + 1) + "ª" : "MEDIANA", "DIFERENÇA"]];
+    var sheetId = sheet.getSheetId();
+    var blocks = [
+        { row: 62, col: 3, values: top, numberFormats: ["NUMBER", "NUMBER", "PERCENT"] },
+        { row: 63, col: 3, values: legend },
+        { row: 64, col: 3, values: [[comentarista2]] }
+    ];
+    var requests = blocks.map(function(block) {
+        return { updateCells: {
+            range: { sheetId: sheetId, startRowIndex: block.row,
+                endRowIndex: block.row + block.values.length,
+                startColumnIndex: block.col, endColumnIndex: block.col + block.values[0].length },
+            rows: block.values.map(function(row) {
+                return { values: row.map(function(value, index) {
+                    var cell = { userEnteredValue: value.charAt(0) === "="
+                        ? { formulaValue: value } : { stringValue: value } };
+                    if (block.numberFormats) cell.userEnteredFormat = { numberFormat: {
+                        type: block.numberFormats[index], pattern: index === 2 ? "0.00%" : "0.00"
+                    } };
+                    return cell;
+                }) };
+            }),
+            fields: "userEnteredValue" + (block.numberFormats ? ",userEnteredFormat.numberFormat" : "")
+        } };
+    });
+    var apiWritten = false;
+    if (typeof Sheets !== "undefined" && Sheets.Spreadsheets) {
+        try {
+            Sheets.Spreadsheets.batchUpdate({ requests: requests }, sheet.getParent().getId());
+            apiWritten = true;
+        } catch (errApi) {
+            Logger.log("[Rodapé do dia] API indisponível; gravação nativa: " + errApi.message);
+        }
     }
-    if (!anchorCol) return null;
-
-    // Nº de termos: replica o padrão do bloco anterior (fallback 14)
-    var nTerms = 14;
-    var prevF = sheet.getRange(63, 9).getFormula(); // I63 = mediana antiga deslocada
-    if (prevF && prevF.indexOf("OFFSET(") >= 0) {
-        var m = prevF.match(/OFFSET\(/g);
-        if (m && m.length >= 2) nTerms = m.length;
+    if (!apiWritten) {
+        batchSetFormulasSafeNoApiGE_(sheet.getRange(63, 4, 1, 3), top);
+        sheet.getRange(64, 4, 1, 3).setValues(legend);
+        sheet.getRange(65, 4).setValue(comentarista2);
+        sheet.getRange(63, 4, 1, 2).setNumberFormat("0.00");
+        sheet.getRange(63, 6).setNumberFormat("0.00%");
     }
+    return { bloco: "D63:F65", mediana: medianFormula, diaSemana: weekday,
+        gravacao: apiWritten ? "api_atomica" : "nativa" };
+}
 
-    // Não ultrapassar a última coluna histórica
-    var lastAud = audColsHist[audColsHist.length - 1];
-    var maxTerms = Math.floor((lastAud - anchorCol) / 20) + 1;
-    if (maxTerms < 1) maxTerms = 1;
-    if (nTerms > maxTerms) nTerms = maxTerms;
+function congelarMedianaDiaEncerradoHistoricoGE_(sheet) {
+    var range = sheet.getRange(63, 5);
+    if (!/Resumo/i.test(range.getFormula())) return;
+    // Congela apenas a mediana do dia que está sendo arquivado. Dias antigos
+    // não são recalculados quando outra semana é adicionada ao Resumo.
+    var value = range.getValue();
+    if (typeof value !== "number" && value !== "") {
+        throw new Error("A mediana do dia encerrado contém um erro; revise E63 antes da virada.");
+    }
+    if (typeof Sheets !== "undefined" && Sheets.Spreadsheets) {
+        try {
+            var cell = value === "" ? {} : { userEnteredValue: { numberValue: value } };
+            Sheets.Spreadsheets.batchUpdate({ requests: [{ updateCells: {
+                range: { sheetId: sheet.getSheetId(), startRowIndex: 62, endRowIndex: 63,
+                    startColumnIndex: 4, endColumnIndex: 5 },
+                rows: [{ values: [cell] }], fields: "userEnteredValue"
+            } }] }, sheet.getParent().getId());
+            return;
+        } catch (errApi) {
+            Logger.log("[Arquivar mediana] API indisponível; gravação nativa: " + errApi.message);
+        }
+    }
+    range.setValue(value);
+}
 
-    // FIX: gerar em pt-BR (MED + DESLOC + ; ) para gravar via setFormulaSafeNoApiGE_
-    // (USER_ENTERED). A versão anterior em en-US (MEDIAN + OFFSET + ,) ficava
-    // armazenada como literal numa planilha pt-BR, gerando #NAME?.
-    var aL = columnToLetter_(anchorCol);
-    var parts = ["DESLOC(" + aL + "63;0;0;1;1)"];
-    for (var k = 1; k < nTerms; k++) parts.push("DESLOC(" + aL + "63;0;" + (20 * k) + ")");
-    return "=(MED(" + parts.join(";") + "))";
+// Entrada do editor: corrige somente o rodapé do bloco existente.
+function repararRodapeDiaAtualHistoricoGE() {
+    var lock = LockService.getDocumentLock();
+    if (!lock.tryLock(30000)) throw new Error("Não foi possível obter o lock do Histórico.");
+    try {
+        var sheet = SpreadsheetApp.getActive().getSheetByName(CFG.GE_OUT_HISTORICO);
+        var result = repararRodapeDiaAtualHistoricoGE_(sheet, new Date());
+        SpreadsheetApp.flush();
+        Logger.log(JSON.stringify(result));
+        return result;
+    } finally {
+        lock.releaseLock();
+    }
 }
 
 // =============================================================================
@@ -1742,7 +1819,7 @@ function atualizarCalibragemGE() {
 //   3.  Aplicar fórmula de share em E
 //   4.  gerarPrevisaoInicialGE_ — preenche D3:D62 com modelo isolado
 //   5.  atualizarCalibragemGE_ + atualizarFatorTemaGE_ — agora com D preenchido
-//   6.  Bloco row 63-65 (mediana padrão OFFSET, comentaristas, diferença)
+//   6.  Bloco row 63-65 (mediana do Resumo, comentaristas, diferença)
 //   7.  Formatação condicional herdada
 //   8.  Atualizar dashboards (painel preservado: D63 injetado em semana/mês,
 //       com criação automática de nova semana às segundas e novo mês na virada)
@@ -1770,7 +1847,10 @@ function adicionarNovoDiaCoreGE_(programDate) {
             var existStr = existing instanceof Date
                 ? Utilities.formatDate(existing, "America/Sao_Paulo", "dd/MM/yyyy")
                 : existing.toString().trim();
-            if (existStr === dateStr) return { ok: false, motivo: "duplicada" };
+            if (existStr === dateStr) {
+                if (dPos === 0) repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
+                return { ok: false, motivo: "duplicada" };
+            }
         }
     }
 
@@ -1779,6 +1859,7 @@ function adicionarNovoDiaCoreGE_(programDate) {
     //    fórmula fosse arquivada, a inserção de colunas a deslocaria junto e
     //    ela viraria referência circular (#REF!) na coluna histórica,
     //    contaminando B/C/E e a calibragem em cascata.
+    congelarMedianaDiaEncerradoHistoricoGE_(sheet);
     var dFormsOld = sheet.getRange(3, 4, 60, 1).getFormulas();
     for (var fz = 0; fz < 60; fz++) {
         if (dFormsOld[fz][0]) sheet.getRange(3 + fz, 4).clearContent();
@@ -1800,6 +1881,9 @@ function adicionarNovoDiaCoreGE_(programDate) {
         .setFontWeight("bold")
         .setBackground("#FADBD8")
         .setFontColor("#000000");
+
+    sheet.getRange(63, 8, 3, 4).copyTo(sheet.getRange(63, 4, 3, 4), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+    repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
 
     sheet.getRange(2, 4, 1, 4).setValues([["AUDIÊNCIA", "&/MIN", "TEMA", "TERMOS"]]);
     sheet.getRange(2, 4, 1, 4)
@@ -1839,38 +1923,6 @@ function adicionarNovoDiaCoreGE_(programDate) {
     atualizarCalibragemGE_(sheet);
     atualizarFatorTemaGE_(sheet);
     Utilities.sleep(500);
-
-    // ❻ Bloco row 63-65: espelha formato do bloco anterior H63:K65, labels, mediana
-    sheet.getRange(63, 8, 3, 4).copyTo(sheet.getRange(63, 4, 3, 4), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
-
-    sheet.getRange(64, 4, 2, 1).setValues([["COMENTARISTA 1"], ["COMENTARISTA 2"]]);
-    sheet.getRange(64, 6).setValue("DIFERENÇA");
-
-    // Mediana por dia útil (terça=3ª, quarta=4ª, quinta=5ª, sexta=6ª)
-    var weekday = programDate.getDay();
-    var medianaLabel = {
-        2: "MEDIANA 3ª",
-        3: "MEDIANA 4ª",
-        4: "MEDIANA 5ª",
-        5: "MEDIANA 6ª"
-    }[weekday] || "MEDIANA";
-    sheet.getRange(64, 5).setValue(medianaLabel);
-
-    // FIX: mediana no padrão OFFSET da planilha —
-    //   =(MEDIAN(OFFSET(X63,0,0,1,1),OFFSET(X63,0,20),...)) com 14 termos,
-    // ancorada na coluna do mesmo dia da semana mais recente. Gravada com
-    // Range.setFormula nativo (sintaxe en-US, independente do locale).
-    var medianaFormula = gerarFormulaMedianaOffsetGE_(sheet, programDate);
-    if (medianaFormula) {
-        // FIX: setFormulaSafeNoApiGE_ (USER_ENTERED via Sheets API) — respeita locale
-        // pt-BR e interpreta MED/DESLOC/; corretamente.
-        setFormulaSafeNoApiGE_(sheet.getRange(63, 5), medianaFormula);
-    } else {
-        sheet.getRange(63, 5).setValue("");
-    }
-    setFormulaSafeNoApiGE_(sheet.getRange(63, 6), "=(D63/E63)-1");
-    // FIX: NÃO forçar setNumberFormat em F63 — o formato (0.00%) já veio do
-    // copyTo PASTE_FORMAT do bloco anterior.
 
     // ❼ Herdar formatação condicional da coluna equivalente (&/MIN) do bloco anterior: I3:I62 -> E3:E62
     var rules = sheet.getConditionalFormatRules();
@@ -1991,6 +2043,7 @@ function criarOuRepararBlocoDiaAtualGE_(programDate) {
         // formatação condicional, 60 fórmulas e painel. Isso evita o timeout
         // do serviço Planilhas ao repetir manualmente a correção.
         if (colDia === 4) {
+            repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
             var fD63 = sheet.getRange(63, 4).getFormula();
             var fE3 = sheet.getRange(3, 5).getFormula();
             var labelD64 = String(sheet.getRange(64, 4).getDisplayValue() || "");
@@ -2001,14 +2054,14 @@ function criarOuRepararBlocoDiaAtualGE_(programDate) {
                 ? sheet.getRange(painel.rowMesAtual, 2).getFormula() : "";
             if (fD63 && fE3 && labelD64 && /\bD63\b/.test(fSemana) && /\bD63\b/.test(fMes)) {
                 atualizarReferenciasDiaAtualHistoricoGE_(sheet);
-                try { logGE_("VIRADA_DIA", dataStr + " | referências A1/B1/C/E atualizadas para D; reparo pesado ignorado"); } catch (eFast) { }
+                try { logGE_("VIRADA_DIA", dataStr + " | rodapé e referências A1/B1/C/E revalidados; reparo pesado ignorado"); } catch (eFast) { }
                 return {
                     ok: true,
                     criou: false,
                     reparou: false,
                     jaEstavaOk: true,
                     data: dataStr,
-                    detalhe: "bloco já íntegro; referências do dia atual revalidadas"
+                    detalhe: "rodapé e referências do dia atual revalidados"
                 };
             }
         }
@@ -2016,6 +2069,7 @@ function criarOuRepararBlocoDiaAtualGE_(programDate) {
         if (colDia < 0) {
             // Congela o bloco anterior em uma única operação: leituras reais
             // permanecem; projeções que ainda eram fórmulas são descartadas.
+            congelarMedianaDiaEncerradoHistoricoGE_(sheet);
             var oldRange = sheet.getRange(3, 4, 60, 1);
             var oldValues = oldRange.getValues();
             var oldForms = oldRange.getFormulas();
@@ -2052,6 +2106,7 @@ function criarOuRepararBlocoDiaAtualGE_(programDate) {
             .setFontWeight("bold")
             .setBackground("#FADBD8")
             .setFontColor("#000000");
+        repararRodapeDiaAtualHistoricoGE_(sheet, programDate);
         sheet.getRange(2, 4, 1, 4).setValues([["AUDIÊNCIA", "&/MIN", "TEMA", "TERMOS"]])
             .setFontWeight("bold")
             .setBackground("#E74C3C")
@@ -2067,20 +2122,6 @@ function criarOuRepararBlocoDiaAtualGE_(programDate) {
         // Após inserir D:G, o Sheets desloca as referências antigas para H.
         // Reancora os indicadores em D sem recalcular B nem alterar audiência.
         atualizarReferenciasDiaAtualHistoricoGE_(sheet);
-
-        // Rodapé do programa. D63/F63 permanecem vazios antes da primeira leitura.
-        setFormulaSafeNoApiGE_(sheet.getRange(63, 4), '=SEERRO(MÉDIA(D3:D62);"")');
-        var medianaFormula = gerarFormulaMedianaOffsetGE_(sheet, programDate);
-        if (medianaFormula) setFormulaSafeNoApiGE_(sheet.getRange(63, 5), medianaFormula);
-        else sheet.getRange(63, 5).clearContent();
-        setFormulaSafeNoApiGE_(sheet.getRange(63, 6),
-            '=SE(OU(D63="";E63="";E63=0);"";D63/E63-1)');
-
-        var weekday = programDate.getDay();
-        var medianaLabel = { 2: "MEDIANA 3ª", 3: "MEDIANA 4ª", 4: "MEDIANA 5ª", 5: "MEDIANA 6ª" }[weekday] || "MEDIANA";
-        sheet.getRange(64, 4, 2, 1).setValues([["COMENTARISTA 1"], ["COMENTARISTA 2"]]);
-        sheet.getRange(64, 5).setValue(medianaLabel);
-        sheet.getRange(64, 6).setValue("DIFERENÇA");
 
         // A regra de cor do share reúne centenas de faixas. Regravá-la dentro
         // da virada crítica pode consumir vários minutos. A estrutura funcional
@@ -2377,3 +2418,4 @@ function atualizarReferenciasDiaAtualHistoricoGE() {
         lock.releaseLock();
     }
 }
+
